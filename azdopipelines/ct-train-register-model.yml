@@ -6,7 +6,7 @@ trigger:
     include:
     - src/
     - azdopipelines/ct-train-register-model.yml
-  exclude:
+    exclude:
     - README.md
     - CHANGELOG.md
 
