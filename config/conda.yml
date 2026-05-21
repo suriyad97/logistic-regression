@@ -16,9 +16,10 @@ dependencies:
     - python-dotenv>=1.0
 
     # ── Experiment tracking ───────────────────────────────────────
-    # AML automatically injects MLFLOW_TRACKING_URI=azureml
-    # so mlflow writes directly to the AML backend — no SDK needed
+    # azureml-mlflow registers the azureml:// URI scheme so mlflow
+    # can talk to AML's tracking store. Lightweight — no SDK chain.
     - mlflow>=2.7,<3.0
+    - azureml-mlflow>=1.54,<2.0
 
     # ── Hyperparameter optimisation ───────────────────────────────
     - optuna>=3.4,<4.0
