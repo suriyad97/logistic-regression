@@ -1,27 +1,32 @@
-$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
 
-# ─────────────────────────────────────────────────────────────────
-# Azure ML Training Job — Titanic Logistic Regression
-# Triggered by: CT (ct-train-register-model.yml) AZDO pipeline
-# Runs in     : DEV workspace
-#
-# Two modes controlled by environment variable:
-#   ENABLE_TUNING=true  → Optuna hyperparameter search (50 trials)
-#   ENABLE_TUNING=false → Fast training with default hyperparameters
-# ─────────────────────────────────────────────────────────────────
-
-display_name: titanic-logistic-regression-training
-description: "Train logistic regression model — with optional Optuna HPO."
+display_name: titanic-logistic-regression-pipeline
+description: "MLOps training pipeline with per-step logs visible in AML Studio"
 experiment_name: titanic-logistic-regression
 
-compute: azureml:logistic12
-environment: azureml:titanic-logistic-regression@latest
+settings:
+  default_compute: azureml:logistic12
+  default_datastore: azureml:workspaceblobstore
+  continue_on_step_failure: false
 
 inputs:
   training_data:
     type: uri_file
     path: azureml:titanic-dataset@latest
     mode: ro_mount
+  enable_tuning:
+    type: string
+    default: "false"
+  n_trials:
+    type: integer
+    default: 50
+  test_size:
+    type: number
+    default: 0.2
+  random_state:
+    type: integer
+    default: 42
 
 outputs:
   model_output:
@@ -29,25 +34,59 @@ outputs:
     path: azureml://datastores/workspaceblobstore/paths/models/titanic/${{name}}
     mode: rw_mount
 
-# The ENABLE_TUNING variable is set by the CT pipeline variable group.
-# Set to "true" for scheduled/drift-triggered retrains (full HPO).
-# Set to "false" for quick CI validation runs.
-command: >-
-  python train.py
-  --data ${{inputs.training_data}}
-  --output ${{outputs.model_output}}
-  --test-size 0.2
-  --random-state 42
-  $([[ "$ENABLE_TUNING" == "true" ]] && echo "--tune --n-trials $N_TRIALS" || echo "")
+jobs:
 
-code: ../../src
+  # ─────────────────────────────────────────────────────────────────
+  # STEP 1: Train
+  # Click this step in AML Studio to see training logs,
+  # mlflow metrics, hyperparameter search progress etc.
+  # ─────────────────────────────────────────────────────────────────
+  train:
+    type: command
+    display_name: "Step 1 - Train Model"
+    code: ../../src
+    command: >-
+      python train.py
+      --data ${{inputs.training_data}}
+      --output ${{outputs.model_output}}
+      --test-size ${{inputs.test_size}}
+      --random-state ${{inputs.random_state}}
+    inputs:
+      training_data: ${{parent.inputs.training_data}}
+      test_size: ${{parent.inputs.test_size}}
+      random_state: ${{parent.inputs.random_state}}
+    outputs:
+      model_output: ${{parent.outputs.model_output}}
+    environment: azureml:titanic-logistic-regression@latest
+    environment_variables:
+      MLFLOW_TRACKING_URI: azureml
+      MLFLOW_EXPERIMENT_NAME: titanic-logistic-regression
+      ENABLE_TUNING: ${{parent.inputs.enable_tuning}}
+      N_TRIALS: ${{parent.inputs.n_trials}}
 
-environment_variables:
-  MLFLOW_TRACKING_URI: azureml
-  MLFLOW_EXPERIMENT_NAME: titanic-logistic-regression
-  ENABLE_TUNING: "false"   # override in CT pipeline variable group
-  N_TRIALS: "50"           # number of Optuna trials when tuning is on
-
-resources:
-  instance_type: Standard_DS3_v2
-  instance_count: 1
+  # ─────────────────────────────────────────────────────────────────
+  # STEP 2: Evaluate
+  # Click this step in AML Studio to see metrics, confusion matrix,
+  # SHAP/LIME explanations, and model quality gate result.
+  # ─────────────────────────────────────────────────────────────────
+  evaluate:
+    type: command
+    display_name: "Step 2 - Evaluate Model"
+    code: ../../src
+    command: >-
+      python evaluate.py
+      --model ${{inputs.model_dir}}/model.pkl
+      --preprocessor ${{inputs.model_dir}}/preprocessor.pkl
+      --data ${{inputs.training_data}}
+      --output ${{outputs.eval_output}}
+    inputs:
+      model_dir: ${{parent.jobs.train.outputs.model_output}}
+      training_data: ${{parent.inputs.training_data}}
+    outputs:
+      eval_output:
+        type: uri_folder
+        mode: rw_mount
+    environment: azureml:titanic-logistic-regression@latest
+    environment_variables:
+      MLFLOW_TRACKING_URI: azureml
+      MLFLOW_EXPERIMENT_NAME: titanic-logistic-regression
