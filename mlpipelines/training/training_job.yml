@@ -10,23 +10,18 @@ settings:
   default_datastore: azureml:workspaceblobstore
   continue_on_step_failure: false
 
+# Pipeline-level inputs
+# Primitive values: just the value directly (no type:/default: — that is component syntax)
+# Data inputs: type + path only
 inputs:
   training_data:
     type: uri_file
-    path: azureml:titanic-dataset@latest
+    path: azureml://subscriptions/09d49851-6ebc-486d-a30c-7d975776628b/resourcegroups/ml-pipeline-rg/workspaces/logistic-regression-ws/datastores/logistic/paths/raw_data/titanic.csv
     mode: ro_mount
-  enable_tuning:
-    type: string
-    default: "false"
-  n_trials:
-    type: string
-    default: "50"
-  test_size:
-    type: string
-    default: "0.2"
-  random_state:
-    type: string
-    default: "42"
+  enable_tuning: "false"
+  n_trials: "50"
+  test_size: "0.2"
+  random_state: "42"
 
 outputs:
   model_output:
@@ -38,8 +33,7 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────
   # STEP 1: Train
-  # In AML Studio: click this node -> Outputs+logs -> user_logs/std_log.txt
-  # Shows: data preprocessing, training progress, MLflow metrics
+  # AML Studio -> click node -> Outputs+logs -> user_logs/std_log.txt
   # ────────────────────────────────────────────────────────────────
   train:
     type: command
@@ -66,8 +60,7 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────
   # STEP 2: Evaluate
-  # In AML Studio: click this node -> Outputs+logs -> user_logs/std_log.txt
-  # Shows: accuracy, F1, AUC-ROC, confusion matrix, SHAP values
+  # AML Studio -> click node -> Outputs+logs -> user_logs/std_log.txt
   # ────────────────────────────────────────────────────────────────
   evaluate:
     type: command

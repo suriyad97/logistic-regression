@@ -60,39 +60,7 @@ stages:
     steps:
     - checkout: self
 
-    - task: AzureCLI@2
-      displayName: 'Step 1 - Register data asset in DEV workspace'
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          set -e
-          az extension add -n ml -y --allow-preview true
 
-          echo "Registering titanic-dataset data asset..."
-
-          # Check if data asset already exists
-          EXISTING=$(az ml data show \
-            --name titanic-dataset \
-            --label latest \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query version -o tsv 2>/dev/null || echo "")
-
-          if [ -n "$EXISTING" ]; then
-            echo "Data asset titanic-dataset already exists at version $EXISTING — skipping upload."
-          else
-            az ml data create \
-              --name titanic-dataset \
-              --version 1 \
-              --type uri_file \
-              --path data/titanic.csv \
-              --description "Titanic passenger survival dataset - training split" \
-              --resource-group $(devRG) \
-              --workspace-name $(devWS)
-            echo "Data asset registered."
-          fi
 
     - task: AzureCLI@2
       displayName: 'Step 2 - Submit training job to AML (logistic12 compute)'
