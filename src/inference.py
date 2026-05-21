@@ -52,7 +52,7 @@ class ModelInference:
         try:
             # Load or process data
             if isinstance(data, str):
-                df = self.processor.load_data(data)
+                df = self.processor.load_data(data, is_training=False)
             else:
                 df = data.copy()
             

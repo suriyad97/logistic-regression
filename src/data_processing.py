@@ -14,7 +14,7 @@ import joblib
 
 # Pandera schema validation
 try:
-    from schema import validate_raw, validate_processed
+    from schema import validate_raw, validate_raw_inference
     HAS_PANDERA = True
 except ImportError:
     HAS_PANDERA = False
@@ -39,12 +39,14 @@ class DataProcessor:
         self.label_encoders: Dict[str, LabelEncoder] = {}
         self.feature_names = None
         
-    def load_data(self, data_path: str) -> pd.DataFrame:
+    def load_data(self, data_path: str, is_training: bool = True) -> pd.DataFrame:
         """
-        Load CSV data from file path and validate against RawTitanicSchema.
+        Load CSV data from file path and validate against schema.
 
         Args:
             data_path: Path to CSV file
+            is_training: If True, validates against RawTitanicSchema (requires 'Survived').
+                        If False, validates against InferenceRawTitanicSchema (Survived optional).
 
         Returns:
             Loaded DataFrame (validated)
@@ -55,9 +57,15 @@ class DataProcessor:
 
         # ── Pandera raw schema validation ─────────────────────────
         if HAS_PANDERA:
-            result = validate_raw(df, raise_on_error=True)
+            if is_training:
+                result = validate_raw(df, raise_on_error=True)
+                schema_name = "training"
+            else:
+                result = validate_raw_inference(df, raise_on_error=True)
+                schema_name = "inference"
+            
             if result.passed:
-                logger.info("Raw data schema validation passed")
+                logger.info(f"Raw data ({schema_name}) schema validation passed")
         # ─────────────────────────────────────────────────────────
 
         return df
@@ -226,7 +234,7 @@ class DataProcessor:
             X_train, X_test, y_train, y_test, and feature names (if training)
         """
         # Load and clean data
-        df = self.load_data(data_path)
+        df = self.load_data(data_path, is_training=is_training)
         df = self.handle_missing_values(df)
         df = self.feature_engineering(df, is_training=is_training)
         df = self.encode_categorical_features(df, is_training=is_training)
