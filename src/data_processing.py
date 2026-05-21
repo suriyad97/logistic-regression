@@ -14,7 +14,7 @@ import joblib
 
 # Pandera schema validation
 try:
-    from schema import validate_raw, validate_raw_inference
+    from schema import validate_raw, validate_raw_inference, validate_processed
     HAS_PANDERA = True
 except ImportError:
     HAS_PANDERA = False
