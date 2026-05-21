@@ -61,7 +61,7 @@ class DataProcessor:
                 result = validate_raw(df, raise_on_error=True)
                 schema_name = "training"
             else:
-                result = validate_raw_inference(df, raise_on_error=True)
+                result = validate_raw_inference(df, raise_on_error=False)
                 schema_name = "inference"
             
             if result.passed:

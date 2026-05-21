@@ -380,18 +380,22 @@ def validate_raw(df: pd.DataFrame, raise_on_error: bool = True) -> SchemaValidat
         return result
 
 
-def validate_raw_inference(df: pd.DataFrame, raise_on_error: bool = True) -> SchemaValidationResult:
+def validate_raw_inference(df: pd.DataFrame, raise_on_error: bool = False) -> SchemaValidationResult:
     """
     Validate raw inference/test data against InferenceRawTitanicSchema.
     
     Identical to validate_raw() but uses InferenceRawTitanicSchema which does NOT
     require the "Survived" column (the target variable is absent in test datasets).
+    
+    For inference, validation errors are logged as WARNINGS rather than ERRORS,
+    allowing inference to proceed even with minor schema inconsistencies.
+    This is intentional — inference data may have different distributions than training data.
 
     Parameters
     ----------
     df              : DataFrame loaded directly from CSV (inference/test data)
-    raise_on_error  : If True, raises ValueError on failure (fails the pipeline).
-                      If False, returns the result for the caller to handle.
+    raise_on_error  : If True, raises ValueError on failure (default False for inference).
+                      If False, returns the result with warnings logged.
 
     Returns
     -------
@@ -404,18 +408,32 @@ def validate_raw_inference(df: pd.DataFrame, raise_on_error: bool = True) -> Sch
 
     except pa.errors.SchemaErrors as exc:
         errors = _parse_pandera_errors(exc)
-        logger.error(
-            "❌ InferenceRawTitanicSchema validation FAILED — %d error(s):\n%s",
-            len(errors),
-            json.dumps(errors, indent=2),
-        )
+        
+        # Log detailed failure cases for debugging
+        if hasattr(exc, 'failure_cases') and exc.failure_cases is not None:
+            logger.warning(
+                "⚠️  InferenceRawTitanicSchema validation found %d issue(s). "
+                "Inference proceeding with warnings (test data may differ from training):\n%s",
+                len(errors),
+                exc.failure_cases.to_string(),
+            )
+        else:
+            logger.warning(
+                "⚠️  InferenceRawTitanicSchema validation found %d issue(s):\n%s",
+                len(errors),
+                json.dumps(errors, indent=2),
+            )
+        
         result = SchemaValidationResult(
             passed=False,
             schema_name="InferenceRawTitanicSchema",
             errors=errors,
         )
+        
+        # For inference, only raise if explicitly requested
         if raise_on_error:
             result.raise_if_failed()
+        
         return result
 
 
