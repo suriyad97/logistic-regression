@@ -4,8 +4,9 @@ trigger:
     - master
   paths:
     include:
-    - config/environment.yml
     - config/conda.yml
+    - config/environment.yml
+    - Dockerfile.train
     - azdopipelines/ci-setup-environment.yml
 
 pr:
@@ -14,16 +15,26 @@ pr:
     - master
   paths:
     include:
-    - config/environment.yml
     - config/conda.yml
+    - Dockerfile.train
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
 - group: ml-pipeline-vars
+- name: imageTag
+  value: 'titanic-logistic-regression:$(Build.BuildId)'
 - name: environmentName
   value: 'titanic-logistic-regression'
+- name: environmentVersion
+  value: '$(Build.BuildId)'
+- name: devACR
+  value: 'logistic'
+- name: qaACR
+  value: 'logisticqa'
+- name: prodACR
+  value: 'logisticprod'
 - name: devRG
   value: 'ml-pipeline-rg'
 - name: devWS
@@ -38,63 +49,65 @@ variables:
   value: 'logistic-regression-prod'
 
 # =============================================================
-# CI Pipeline  -  Build  ->  Push to ACR  ->  DEV  ->  QA  ->  PROD
+# CI Pipeline - Build, Push to ACR, Create AML Env, Promote
 #
-# Step-by-step:
-#   Stage 1 (DEV):
-#     a. Register environment spec in AML DEV workspace
-#     b. AML builds Docker image from conda.yml + base image
-#        and pushes it to DEV ACR automatically
-#     c. Wait up to 90 min for build to complete
-#     d. Read the built image URI from DEV environment
+# Stage 1 - DEV:
+#   az acr build  -> builds Dockerfile.train in ACR managed infra
+#                    (NO compute cluster, runs in Azure ACR service)
+#                 -> pushes image to logistic.azurecr.io
+#   az ml environment create --image -> registers built image as AML env
 #
-#   Stage 2 (QA - after manual approval):
-#     Register environment in QA workspace using the SAME
-#     Docker image URI built in DEV.  No rebuild.
+# Stage 2 - QA (manual approval):
+#   az acr import -> copies image from DEV ACR to logisticqa ACR (no rebuild)
+#   az ml environment create --image -> registers same image in QA workspace
 #
-#   Stage 3 (PROD - after manual approval):
-#     Register environment in PROD workspace using the SAME
-#     Docker image URI built in DEV.  No rebuild.
+# Stage 3 - PROD (manual approval):
+#   az acr import -> copies image from QA ACR to logisticprod ACR (no rebuild)
+#   az ml environment create --image -> registers same image in PROD workspace
 # =============================================================
 
 stages:
 
 # ------------------------------------------------------------------
-# STAGE 1  -  DEV
-# Build Docker image, push to ACR, register environment
+# STAGE 1 - DEV
+# Build Docker image in ACR, push, register as AML environment
 # ------------------------------------------------------------------
 - stage: CI_Dev
-  displayName: 'DEV - Build Docker Image and Push to ACR'
+  displayName: 'DEV - Build and Push Docker Image to ACR'
   jobs:
-  - job: BuildAndPushDev
-    displayName: 'Build image in DEV ACR and register in AML'
-    timeoutInMinutes: 120
+  - job: BuildAndRegister
+    displayName: 'az acr build -> push to logistic.azurecr.io -> create AML env'
+    timeoutInMinutes: 90
     steps:
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'Step 1 - Register environment spec in AML DEV'
+      displayName: 'Build Docker image in DEV ACR (az acr build)'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
           set -e
-          az extension add -n ml -y --allow-preview true
 
-          echo "Registering environment spec..."
-          ENV_VERSION=$(az ml environment create \
-            --file config/environment.yml \
+          echo "=== Building Docker image using ACR managed build ==="
+          echo "Registry : $(devACR).azurecr.io"
+          echo "Image    : $(imageTag)"
+          echo "Dockerfile: Dockerfile.train"
+          echo ""
+
+          az acr build \
+            --registry $(devACR) \
             --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query version -o tsv)
+            --image $(imageTag) \
+            --file Dockerfile.train \
+            .
 
-          echo "Registered: $(environmentName) v$ENV_VERSION in $(devWS)"
-          echo "##vso[task.setvariable variable=ENV_VERSION]$ENV_VERSION"
+          echo "Image built and pushed: $(devACR).azurecr.io/$(imageTag)"
 
     - task: AzureCLI@2
-      displayName: 'Step 2 - Submit job to trigger Docker image build in DEV ACR'
-      timeoutInMinutes: 100
+      displayName: 'Register AML environment in DEV workspace'
+      name: registerDev
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -103,65 +116,15 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
-          echo "Submitting smoke-test job to trigger Docker image build..."
-          JOB_NAME=$(az ml job create \
-            --file scripts/ci/smoke_test_job.yml \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query name -o tsv)
+          FULL_IMAGE="$(devACR).azurecr.io/$(imageTag)"
+          echo "Registering environment: $FULL_IMAGE"
 
-          echo "Job submitted: $JOB_NAME"
-          echo "AML is now building the Docker image from conda.yml and pushing to DEV ACR."
-          echo "Waiting for build + job to complete (first build takes 20-40 min)..."
-
-          # Poll every 30s, max 90 min (180 iterations)
-          for i in $(seq 1 180); do
-            STATUS=$(az ml job show \
-              --name $JOB_NAME \
-              --resource-group $(devRG) \
-              --workspace-name $(devWS) \
-              --query status -o tsv 2>/dev/null || echo "Unknown")
-
-            ELAPSED=$(( i * 30 ))
-            echo "  [${i}/180] ${ELAPSED}s elapsed - Job status: $STATUS"
-
-            if [ "$STATUS" = "Completed" ]; then
-              echo "Docker image built and pushed to DEV ACR successfully."
-              exit 0
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Canceled" ]; then
-              echo "Build job failed ($STATUS) - check AML logs."
-              az ml job show \
-                --name $JOB_NAME \
-                --resource-group $(devRG) \
-                --workspace-name $(devWS) \
-                --query error -o json
-              exit 1
-            fi
-            sleep 30
-          done
-          echo "Timed out after 90 min."; exit 1
-
-    - task: AzureCLI@2
-      displayName: 'Step 3 - Get built image URI from DEV ACR'
-      name: getImageUri
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          set -e
-          az extension add -n ml -y --allow-preview true
-
-          IMAGE_URI=$(az ml environment show \
+          az ml environment create \
             --name $(environmentName) \
-            --label latest \
+            --version $(environmentVersion) \
+            --image "$FULL_IMAGE" \
             --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query "image" -o tsv)
-
-          echo "Built image URI: $IMAGE_URI"
-          echo "##vso[task.setvariable variable=IMAGE_URI;isOutput=true]$IMAGE_URI"
-          echo "##vso[task.setvariable variable=IMAGE_URI]$IMAGE_URI"
+            --workspace-name $(devWS)
 
           az ml environment show \
             --name $(environmentName) \
@@ -170,16 +133,18 @@ stages:
             --workspace-name $(devWS) \
             --query "{name:name, version:version, image:image}" -o table
 
+          echo "##vso[task.setvariable variable=FULL_IMAGE;isOutput=true]$FULL_IMAGE"
+
 # ------------------------------------------------------------------
-# STAGE 2  -  QA
-# Manual approval then register SAME image in QA workspace
+# STAGE 2 - QA
+# Copy image from DEV ACR to QA ACR, register in QA workspace
 # ------------------------------------------------------------------
 - stage: CI_QA
-  displayName: 'QA - Propagate Environment (no rebuild)'
+  displayName: 'QA - Import Image and Register Environment'
   dependsOn: CI_Dev
   condition: succeeded()
   variables:
-    IMAGE_URI: $[ stageDependencies.CI_Dev.BuildAndPushDev.outputs['getImageUri.IMAGE_URI'] ]
+    FULL_IMAGE: $[ stageDependencies.CI_Dev.BuildAndRegister.outputs['registerDev.FULL_IMAGE'] ]
   jobs:
   - job: ApprovalGate_QA
     displayName: 'Manual Approval - Promote to QA'
@@ -188,18 +153,17 @@ stages:
     - task: ManualValidation@0
       inputs:
         notifyUsers: 'suriya.divi@outlook.com'
-        instructions: 'Docker image built and pushed to DEV ACR. Approve to register same image in logistic-regression-qa (no rebuild).'
+        instructions: 'Docker image built and pushed to DEV ACR. Approve to import same image to logisticqa ACR and register in logistic-regression-qa.'
         onTimeout: 'reject'
         timeout: '1440'
 
-  - job: RegisterEnvQA
-    displayName: 'Register environment in logistic-regression-qa'
+  - job: ImportAndRegisterQA
+    displayName: 'Import image to logisticqa ACR -> register in QA workspace'
     dependsOn: ApprovalGate_QA
     condition: succeeded()
     steps:
-    - checkout: self
     - task: AzureCLI@2
-      displayName: 'Register environment in QA workspace'
+      displayName: 'Import image from DEV ACR to QA ACR'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -208,12 +172,24 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
-          echo "Registering environment in QA using DEV image: $(IMAGE_URI)"
+          echo "Importing image to QA ACR (no rebuild)..."
+          echo "Source : $(FULL_IMAGE)"
+          echo "Target : $(qaACR).azurecr.io/$(imageTag)"
+
+          az acr import \
+            --name $(qaACR) \
+            --resource-group $(qaRG) \
+            --source "$(FULL_IMAGE)" \
+            --image $(imageTag) \
+            --force
+
+          QA_IMAGE="$(qaACR).azurecr.io/$(imageTag)"
+          echo "Image imported to QA ACR: $QA_IMAGE"
 
           az ml environment create \
             --name $(environmentName) \
-            --version $(ENV_VERSION) \
-            --image "$(IMAGE_URI)" \
+            --version $(environmentVersion) \
+            --image "$QA_IMAGE" \
             --resource-group $(qaRG) \
             --workspace-name $(qaWS)
 
@@ -224,18 +200,16 @@ stages:
             --workspace-name $(qaWS) \
             --query "{name:name, version:version, image:image}" -o table
 
-          echo "Environment registered in QA. Same Docker image - no rebuild."
-
 # ------------------------------------------------------------------
-# STAGE 3  -  PROD
-# Manual approval then register SAME image in PROD workspace
+# STAGE 3 - PROD
+# Copy image from QA ACR to PROD ACR, register in PROD workspace
 # ------------------------------------------------------------------
 - stage: CI_Prod
-  displayName: 'PROD - Propagate Environment (no rebuild)'
+  displayName: 'PROD - Import Image and Register Environment'
   dependsOn: CI_QA
   condition: succeeded()
   variables:
-    IMAGE_URI: $[ stageDependencies.CI_Dev.BuildAndPushDev.outputs['getImageUri.IMAGE_URI'] ]
+    FULL_IMAGE: $[ stageDependencies.CI_Dev.BuildAndRegister.outputs['registerDev.FULL_IMAGE'] ]
   jobs:
   - job: ApprovalGate_Prod
     displayName: 'Manual Approval - Promote to PROD'
@@ -244,18 +218,17 @@ stages:
     - task: ManualValidation@0
       inputs:
         notifyUsers: 'suriya.divi@outlook.com'
-        instructions: 'QA validated. Approve to register same image in logistic-regression-prod. WARNING: affects all PROD jobs.'
+        instructions: 'QA environment validated. Approve to import same image to logisticprod ACR and register in logistic-regression-prod.'
         onTimeout: 'reject'
         timeout: '1440'
 
-  - job: RegisterEnvProd
-    displayName: 'Register environment in logistic-regression-prod'
+  - job: ImportAndRegisterProd
+    displayName: 'Import image to logisticprod ACR -> register in PROD workspace'
     dependsOn: ApprovalGate_Prod
     condition: succeeded()
     steps:
-    - checkout: self
     - task: AzureCLI@2
-      displayName: 'Register environment in PROD workspace'
+      displayName: 'Import image from QA ACR to PROD ACR'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -264,12 +237,22 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
-          echo "Registering environment in PROD using DEV image: $(IMAGE_URI)"
+          echo "Importing image to PROD ACR (no rebuild)..."
+          PROD_IMAGE="$(prodACR).azurecr.io/$(imageTag)"
+
+          az acr import \
+            --name $(prodACR) \
+            --resource-group $(prodRG) \
+            --source "$(qaACR).azurecr.io/$(imageTag)" \
+            --image $(imageTag) \
+            --force
+
+          echo "Image imported to PROD ACR: $PROD_IMAGE"
 
           az ml environment create \
             --name $(environmentName) \
-            --version $(ENV_VERSION) \
-            --image "$(IMAGE_URI)" \
+            --version $(environmentVersion) \
+            --image "$PROD_IMAGE" \
             --resource-group $(prodRG) \
             --workspace-name $(prodWS)
 
@@ -280,7 +263,15 @@ stages:
             --workspace-name $(prodWS) \
             --query "{name:name, version:version, image:image}" -o table
 
-          python3 -c "import json,datetime; print(json.dumps({'promoted_at': datetime.datetime.utcnow().isoformat(), 'image': '$(IMAGE_URI)', 'build': '$(Build.BuildNumber)', 'commit': '$(Build.SourceVersion)'}, indent=2))" > env_audit.json
+          python3 -c "
+import json, datetime
+print(json.dumps({
+  'promoted_at': datetime.datetime.utcnow().isoformat(),
+  'image': '$PROD_IMAGE',
+  'build_id': '$(Build.BuildId)',
+  'commit': '$(Build.SourceVersion)'
+}, indent=2))
+" > env_audit.json
 
     - task: PublishBuildArtifacts@1
       inputs:
