@@ -1,0 +1,43 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+# ─────────────────────────────────────────────────────────────────
+# Azure ML Data Preparation Job
+# Triggered by: CT pipeline before training (or manually)
+# Runs in     : DEV workspace
+#
+# Purpose: validates, profiles, and registers the raw CSV as a
+#          versioned AML Data Asset, ensuring reproducible training.
+# ─────────────────────────────────────────────────────────────────
+
+display_name: titanic-data-preparation
+description: "Validate, profile, and register the Titanic training dataset."
+experiment_name: titanic-data-prep
+
+compute: azureml:logistic12
+environment: azureml:titanic-logistic-regression@latest
+
+inputs:
+  raw_data:
+    type: uri_file
+    path: azureml:titanic-dataset@latest
+    mode: ro_mount
+
+outputs:
+  prepared_data:
+    type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/data/prepared/${{name}}
+    mode: rw_mount
+
+command: >-
+  python data_prep_job.py
+  --input-data ${{inputs.raw_data}}
+  --output-path ${{outputs.prepared_data}}
+
+code: .
+
+environment_variables:
+  MLFLOW_TRACKING_URI: azureml
+
+resources:
+  instance_type: Standard_DS3_v2
+  instance_count: 1

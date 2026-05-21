@@ -1,0 +1,58 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+# ─────────────────────────────────────────────────────────────────
+# Azure ML Monitoring Job
+# Triggered by: CM pipeline (cm-monitoring-drift.yml)
+# Runs in     : PROD workspace
+#
+# Runs data drift + concept drift detection together as a
+# single AML job so results are tracked in MLflow.
+# ─────────────────────────────────────────────────────────────────
+
+display_name: titanic-drift-monitoring
+description: "Detect data drift and concept drift in production predictions."
+experiment_name: titanic-monitoring
+
+compute: azureml:inference-cluster
+environment: azureml:titanic-logistic-regression@latest
+
+inputs:
+  predictions_data:
+    type: uri_folder
+    path: azureml:titanic-predictions@latest
+    mode: ro_mount
+
+  ground_truth_data:
+    type: uri_folder
+    path: azureml:titanic-feedback@latest
+    mode: ro_mount
+    optional: true
+
+  baseline_model:
+    type: mlflow_model
+    path: azureml:titanic-logistic-regression@latest
+    mode: ro_mount
+
+outputs:
+  monitoring_report:
+    type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/monitoring/${{name}}
+    mode: rw_mount
+
+command: >-
+  python monitoring_job.py
+  --predictions-path ${{inputs.predictions_data}}
+  --ground-truth-path ${{inputs.ground_truth_data}}
+  --baseline-model-path ${{inputs.baseline_model}}
+  --output-path ${{outputs.monitoring_report}}
+
+code: .
+
+environment_variables:
+  MLFLOW_TRACKING_URI: azureml
+  DATA_DRIFT_THRESHOLD: "0.05"
+  CONCEPT_DRIFT_THRESHOLD: "0.03"
+
+resources:
+  instance_type: Standard_DS3_v2
+  instance_count: 1

@@ -1,0 +1,155 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - src/
+    - data/
+    - azdopipelines/ct-train-register-model.yml
+  exclude:
+    - README.md
+    - CHANGELOG.md
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.12'
+  environmentName: 'titanic-logistic-regression'
+  modelName: 'titanic-logistic-regression'
+  computeTarget: 'logistic12'
+  # Optuna tuning toggle — set to 'true' in the AzDO variable group for
+  # drift-triggered retrains; 'false' for fast CI validation runs
+  enableTuning: 'false'
+  nTrials: '50'
+
+stages:
+- stage: Train_Dev
+  displayName: 'CT: Training in DEV'
+  jobs:
+  - job: TrainModel
+    displayName: 'Train and Register Model'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install Dependencies'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+          
+          # Create data asset if not exists
+          python scripts/create_data_asset.py \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --data-path data/titanic.csv
+      displayName: 'Create/Update Data Asset'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+          
+          # Submit training job
+          JOB_ID=$(az ml job create \
+            --file mlpipelines/training/training_job.yml \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --set environment_variables.ENABLE_TUNING=$(enableTuning) \
+            --set environment_variables.N_TRIALS=$(nTrials) \
+            --query name -o tsv)
+          
+          echo "Job ID: $JOB_ID"
+          echo "##vso[task.setvariable variable=JOB_ID]$JOB_ID"
+          
+          # Wait for job completion
+          az ml job stream --name $JOB_ID \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+      displayName: 'Submit Training Job'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+          
+          # Register model from training job
+          MODEL_VERSION=$(az ml model create \
+            --name $(modelName) \
+            --path "azureml://jobs/$(JOB_ID)/outputs/artifacts/model" \
+            --type "custom_model" \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --query version -o tsv)
+          
+          echo "Model Version: $MODEL_VERSION"
+          echo "##vso[task.setvariable variable=MODEL_VERSION]$MODEL_VERSION"
+          
+          # Tag model with metadata
+          az ml model update \
+            --name $(modelName) \
+            --version $MODEL_VERSION \
+            --set tags.training_job=$(JOB_ID) \
+            --set tags.environment=dev \
+            --set tags.git_commit=$(Build.SourceVersion) \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+      displayName: 'Register Model'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'model'
+        ArtifactName: 'trained-model'
+      displayName: 'Publish Model Artifacts'
+      condition: succeeded()
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+
+          # Download the freshly registered model to validate locally
+          az ml model download \
+            --name $(modelName) \
+            --version $(MODEL_VERSION) \
+            --download-path ./model_to_validate \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+
+          python scripts/validate_model.py \
+            --model-path ./model_to_validate \
+            --test-data data/titanic.csv \
+            --output validation_result.json
+      displayName: 'Validate Model Quality (Gate)'
+      # Fails the pipeline if accuracy/F1/AUC are below thresholds
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'validation_result.json'
+        ArtifactName: 'validation-report'
+      displayName: 'Publish Validation Report'
+      condition: always()

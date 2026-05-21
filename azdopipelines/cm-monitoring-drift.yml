@@ -1,0 +1,303 @@
+trigger: none
+
+schedules:
+- cron: "0 6 * * *"
+  displayName: 'Daily Drift Detection at 6 AM UTC'
+  branches:
+    include:
+    - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.12'
+  modelName: 'titanic-logistic-regression'
+  dataDistributionThreshold: 0.05   # KS-test p-value threshold for data drift
+  conceptDriftThreshold: 0.03       # Accuracy drop threshold for concept drift
+
+stages:
+# ─────────────────────────────────────────────────────────────────
+# STAGE 1: Run drift detection on production data
+# ─────────────────────────────────────────────────────────────────
+- stage: Monitor_Prod
+  displayName: 'CM: Production Monitoring & Drift Detection'
+  jobs:
+  - job: DetectDrift
+    displayName: 'Detect Data, Prediction & Concept Drift'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install Dependencies'
+
+    # Pull baseline feature statistics from DEV workspace (training run)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/get_baseline_data.py \
+            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
+            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --model-name $(modelName) \
+            --output baseline_stats.json
+      displayName: 'Retrieve Baseline Statistics'
+      env:
+        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+
+    # Download latest batch predictions from PROD
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+
+          PRED_VERSION=$(az ml data list \
+            --name titanic-predictions \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --query "[0].version" -o tsv)
+
+          echo "Downloading predictions version: $PRED_VERSION"
+          az ml data download \
+            --name titanic-predictions \
+            --version $PRED_VERSION \
+            --download-path ./predictions \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod
+      displayName: 'Download Latest Production Predictions'
+
+    # Download ground truth feedback if available
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+
+          GT_VERSION=$(az ml data list \
+            --name titanic-feedback \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --query "[0].version" -o tsv 2>/dev/null || echo "")
+
+          if [ -n "$GT_VERSION" ]; then
+            echo "Found feedback data v$GT_VERSION — downloading"
+            az ml data download \
+              --name titanic-feedback \
+              --version $GT_VERSION \
+              --download-path ./ground_truth \
+              --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+              --workspace-name $(AZURE_ML_WORKSPACE)-prod
+            echo "##vso[task.setvariable variable=HAS_GROUND_TRUTH]true"
+          else
+            echo "No feedback data found — concept drift will be skipped"
+            echo "##vso[task.setvariable variable=HAS_GROUND_TRUTH]false"
+          fi
+      displayName: 'Download Ground Truth Feedback (if available)'
+      continueOnError: true
+
+    # Detect data distribution drift (KS test + Wasserstein)
+    - script: |
+        python mlpipelines/monitoring/detect_data_drift.py \
+          --baseline-stats baseline_stats.json \
+          --production-data ./predictions \
+          --threshold $(dataDistributionThreshold) \
+          --output data_drift_report.json
+      displayName: 'Detect Data Distribution Drift'
+
+    # Detect concept drift (requires ground truth)
+    - script: |
+        if [ "$(HAS_GROUND_TRUTH)" == "true" ]; then
+          python mlpipelines/monitoring/detect_concept_drift.py \
+            --baseline-stats baseline_stats.json \
+            --predictions-path ./predictions \
+            --ground-truth-path ./ground_truth \
+            --threshold $(conceptDriftThreshold) \
+            --output concept_drift_report.json
+        else
+          echo '{"concept_drift_detected": false, "reason": "No ground truth available"}' > concept_drift_report.json
+        fi
+      displayName: 'Detect Concept Drift'
+
+    # Consolidate into a single severity-graded report
+    - script: |
+        python scripts/analyze_drift_results.py \
+          --drift-report data_drift_report.json \
+          --concept-drift-report concept_drift_report.json \
+          --output analysis_results.json
+      displayName: 'Analyze & Consolidate Drift Results'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'analysis_results.json'
+        ArtifactName: 'drift-analysis'
+      displayName: 'Publish Drift Analysis Report'
+      condition: always()
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'data_drift_report.json'
+        ArtifactName: 'drift-reports'
+      displayName: 'Publish Raw Drift Reports'
+      condition: always()
+
+    # Exit 1 if drift is actionable — triggers the Notify stage
+    - script: |
+        python scripts/check_drift_threshold.py \
+          --drift-report data_drift_report.json \
+          --concept-drift-report concept_drift_report.json \
+          --analysis analysis_results.json
+      displayName: 'Check Drift Threshold (Gate)'
+      # continueOnError: true lets the pipeline move to Notify_and_Alert
+      # even when this script exits 1
+      continueOnError: true
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 2: Alert the team (runs when Monitor_Prod fails/drift found)
+# ─────────────────────────────────────────────────────────────────
+- stage: Notify_and_Alert
+  displayName: 'Send Alerts if Drift Detected'
+  dependsOn: Monitor_Prod
+  # Run this stage whenever Monitor_Prod finishes (drift sets it to failed via exit 1)
+  condition: failed()
+  jobs:
+  - job: SendAlerts
+    displayName: 'Send Notifications & Log to App Insights'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install Dependencies'
+
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'drift-analysis'
+        downloadPath: '$(System.ArtifactsDirectory)'
+      displayName: 'Download Drift Analysis'
+      continueOnError: true
+
+    # Log structured event to Application Insights (permanent audit trail)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/log_alert_to_insights.py \
+            --severity HIGH \
+            --message "Data/concept drift detected in Titanic production model" \
+            --build-uri $(Build.BuildUri)
+      displayName: 'Log Alert to Application Insights'
+      env:
+        APPINSIGHTS_KEY: $(APPINSIGHTS_KEY)
+      condition: always()
+
+    # Send email via Azure DevOps Service Hook
+    # NOTE: Configure the SMTP service connection in Project Settings → Service connections
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Use Azure Communication Services to send email
+          # Alternatively configure a Logic App webhook triggered here
+          echo "=== DRIFT ALERT ==="
+          echo "Severity: HIGH"
+          echo "Build: $(Build.BuildUri)"
+          echo "Team notification: configure Logic App or Azure Communication Services"
+          echo "=== END ALERT ==="
+          
+          # If you have a webhook URL (Teams/Slack), call it here:
+          # curl -X POST "$TEAMS_WEBHOOK_URL" \
+          #   -H "Content-Type: application/json" \
+          #   -d "{\"text\": \"⚠️ Drift detected in Titanic prod model. Review: $(Build.BuildUri)\"}"
+      displayName: 'Send Team Notification'
+      condition: always()
+
+    # Create a work item in Azure Boards for tracking
+    - task: CreateWorkItem@1
+      inputs:
+        workItemType: 'Task'
+        title: '⚠️ Model Drift Detected — $(Build.BuildNumber)'
+        fieldMappings: |
+          Description=Data or concept drift detected in the Titanic production model.
+          Review drift report at: $(Build.BuildUri)
+          Assigned To=$(DRIFT_OWNER)
+        associate: true
+        linkType: 'System.LinkTypes.Related'
+      displayName: 'Create Azure Boards Work Item'
+      continueOnError: true
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 3: NOTIFY only — no automatic retraining (as per design)
+# The on-call team reviews the drift report and manually triggers
+# the CT pipeline (ct-train-register-model) if retraining is needed.
+# ─────────────────────────────────────────────────────────────────
+- stage: Log_Retrain_Recommendation
+  displayName: 'Log Retraining Recommendation'
+  dependsOn: Notify_and_Alert
+  condition: succeeded()
+  jobs:
+  - job: LogRecommendation
+    displayName: 'Log Recommendation to Run CT Pipeline'
+    steps:
+    - script: |
+        echo "=============================================="
+        echo " RECOMMENDATION: Trigger CT retraining pipeline"
+        echo " Pipeline: ct-train-register-model"
+        echo " Reason: Drift detected in production"
+        echo " Action: Review drift report, then manually"
+        echo "         queue the CT pipeline in Azure DevOps"
+        echo "=============================================="
+      displayName: 'Output Retraining Recommendation'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Log the recommendation as a tagged run in AML for traceability
+          python -c "
+          import json, datetime
+          rec = {
+            'timestamp': datetime.datetime.utcnow().isoformat(),
+            'recommendation': 'RETRAIN',
+            'reason': 'Drift detected in production',
+            'action_required': 'Manually trigger ct-train-register-model pipeline',
+            'build': '$(Build.BuildNumber)'
+          }
+          with open('retrain_recommendation.json', 'w') as f:
+              json.dump(rec, f, indent=2)
+          print(json.dumps(rec, indent=2))
+          "
+      displayName: 'Write Retraining Recommendation JSON'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'retrain_recommendation.json'
+        ArtifactName: 'retrain-recommendation'
+      displayName: 'Publish Recommendation'

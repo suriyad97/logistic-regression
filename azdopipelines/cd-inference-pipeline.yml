@@ -1,0 +1,106 @@
+trigger: none
+
+schedules:
+- cron: "0 2 * * *"
+  displayName: 'Daily Inference at 2 AM UTC'
+  branches:
+    include:
+    - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.12'
+  modelName: 'titanic-logistic-regression'
+  abTestSplit: 0.10  # 10% of traffic to challenger
+
+stages:
+- stage: Inference_Prod
+  displayName: 'CD: Inference and A/B Testing'
+  jobs:
+  - job: RunInference
+    displayName: 'Run Batch Inference with A/B Testing'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install Dependencies'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+          
+          # Get champion model
+          CHAMPION_VERSION=$(az ml model list \
+            --name $(modelName) \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --query "[0].version" -o tsv)
+          
+          echo "Champion Version: $CHAMPION_VERSION"
+          echo "##vso[task.setvariable variable=CHAMPION_VERSION]$CHAMPION_VERSION"
+          
+          # Download model
+          az ml model download \
+            --name $(modelName) \
+            --version $CHAMPION_VERSION \
+            --download-path ./prod_model \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod
+      displayName: 'Download Champion Model'
+
+    - script: |
+        python mlpipelines/inference/inference_batch.py \
+          --model-path ./prod_model \
+          --input-data data/titanic.csv \
+          --output-path ./predictions \
+          --ab-test-enabled true \
+          --ab-test-split $(abTestSplit)
+      displayName: 'Run Batch Inference'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Upload predictions to data asset
+          python scripts/upload_predictions.py \
+            --predictions-path ./predictions \
+            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
+            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --environment prod
+      displayName: 'Log Predictions for Monitoring'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: './predictions'
+        ArtifactName: 'batch-predictions'
+      displayName: 'Publish Predictions'
+
+    - script: |
+        # Generate inference report
+        python scripts/generate_inference_report.py \
+          --predictions-path ./predictions \
+          --output report.html
+      displayName: 'Generate Inference Report'
+      continueOnError: true
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'report.html'
+        ArtifactName: 'inference-report'
+      displayName: 'Publish Report'
+      condition: always()

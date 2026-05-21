@@ -1,0 +1,47 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+# ─────────────────────────────────────────────────────────────────
+# Azure ML Batch Inference Job
+# Triggered by: CD (cd-inference-pipeline.yml) AZDO pipeline
+# Runs in     : PROD workspace
+# ─────────────────────────────────────────────────────────────────
+
+display_name: titanic-batch-inference
+description: "Run batch inference with the champion model and log predictions."
+experiment_name: titanic-inference
+
+compute: azureml:inference-cluster
+
+environment: azureml:titanic-logistic-regression@latest
+
+inputs:
+  model_input:
+    type: uri_folder
+    mode: ro_mount
+
+  inference_data:
+    type: uri_file
+    path: azureml:titanic-inference-data@latest
+    mode: ro_mount
+
+outputs:
+  predictions_output:
+    type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/predictions/titanic/${{name}}
+    mode: rw_mount
+
+command: >-
+  python inference_batch.py
+  --model-path ${{inputs.model_input}}
+  --input-data ${{inputs.inference_data}}
+  --output-path ${{outputs.predictions_output}}
+  --log-predictions true
+
+code: .
+
+environment_variables:
+  MLFLOW_TRACKING_URI: azureml
+
+resources:
+  instance_type: Standard_DS3_v2
+  instance_count: 1
