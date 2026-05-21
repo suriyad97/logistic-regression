@@ -13,7 +13,7 @@ code: ../../src
 inputs:
   input_data:
     type: uri_file
-    path: azureml://datastores/inference_data/paths/predictions/test.csv
+    path: "https://logisticregres3056441073.blob.core.windows.net/data/predictions/test.csv?se=2026-06-21T02%3A31Z&sp=r&spr=https&sv=2026-04-06&sr=b&sig=DQ5W%2FeLzNZEamvTC2hOaZX2UD6j8rgLKu6H1LYYtWyM%3D"
     mode: download
   model_dir:
     type: custom_model
@@ -36,3 +36,4 @@ command: >-
 environment_variables:
   MLFLOW_TRACKING_URI: azureml
   MLFLOW_EXPERIMENT_NAME: titanic-logistic-regression
+
