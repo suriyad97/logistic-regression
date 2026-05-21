@@ -39,33 +39,31 @@ variables:
 - name: prodWS
   value: 'logistic-regression-prod'
 
-# ═══════════════════════════════════════════════════════════════════
-# CI Pipeline — Environment Setup
+# =============================================================
+# CI Pipeline - Environment Setup
 #
 # Runs entirely on the FREE Azure DevOps Ubuntu agent.
-# NO AML compute cluster is used here.
+# NO AML compute cluster is used.
 #
-# Stage ① : Lint — YAML parse + Python syntax              (~1 min)
-# Stage ② : Package check — conda.yml packages installed
-#            on the AzDO agent and imports validated        (~3 min)
-# Stage ③ : DEV — Register environment spec in AML         (~1 min)
-# Stage ④ : QA  — Manual approval → propagate to QA WS
-# Stage ⑤ : PROD — Manual approval → propagate to PROD WS
+# Stage 1 - Lint     : YAML parse + Python syntax   (~1 min)
+# Stage 2 - PkgCheck : pip install + import verify  (~5 min)
+# Stage 3 - DEV      : Register env spec in AML     (~1 min)
+# Stage 4 - QA       : Manual approval -> QA WS
+# Stage 5 - PROD     : Manual approval -> PROD WS
 #
-# The AML Docker image is built lazily by AML the first time
-# the CT training job runs — CI does NOT need to wait for it.
-# ═══════════════════════════════════════════════════════════════════
+# AML Docker image is built lazily when CT training job runs.
+# =============================================================
 
 stages:
 
-# ──────────────────────────────────────────────────────────────────
-# STAGE 1: Lint & validate (AzDO agent — free)
-# ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# STAGE 1 - Lint and schema check (AzDO agent - free)
+# -------------------------------------------------------------
 - stage: Validate
-  displayName: '① Validate — Lint & Schema Check'
+  displayName: 'Stage 1 - Validate Lint and Schema Check'
   jobs:
   - job: LintAndValidate
-    displayName: 'YAML parse + Python syntax check'
+    displayName: 'YAML parse and Python syntax check'
     steps:
     - checkout: self
 
@@ -75,43 +73,44 @@ stages:
       displayName: 'Use Python 3.10'
 
     - script: |
+        set -e
         pip install pyyaml --quiet
-        echo "=== Checking all YAML files parse cleanly ==="
-        python -c "
-        import yaml, glob, sys
-        files = glob.glob('**/*.yml', recursive=True)
-        errors = []
-        for f in files:
-            try:
-                yaml.safe_load(open(f))
-                print(f'  OK  {f}')
-            except Exception as e:
-                errors.append(f'  FAIL {f}: {e}')
-        if errors:
-            print('\n'.join(errors))
-            sys.exit(1)
-        print(f'All {len(files)} YAML files valid')
-        "
+        echo "=== Checking all YAML files ==="
+        python - << 'PYEOF'
+import yaml, glob, sys
+files = glob.glob('**/*.yml', recursive=True)
+errors = []
+for f in files:
+    try:
+        yaml.safe_load(open(f, encoding='utf-8', errors='replace'))
+        print(f'  OK  {f}')
+    except Exception as e:
+        errors.append(f'  FAIL {f}: {e}')
+if errors:
+    print('\n'.join(errors))
+    sys.exit(1)
+print(f'All {len(files)} YAML files valid')
+PYEOF
         echo "=== Checking Python syntax ==="
         python -m py_compile src/train.py src/data_processing.py src/inference.py src/schema.py src/explain.py
         echo "All syntax checks passed"
-      displayName: 'YAML + Python syntax check'
+      displayName: 'YAML and Python syntax check'
 
-# ──────────────────────────────────────────────────────────────────
-# STAGE 2: Package install check (AzDO agent — free, ~3 min)
-# ──────────────────────────────────────────────────────────────────
-# PURPOSE: Verify that the packages in config/conda.yml actually
-# install and import correctly BEFORE registering in AML.
-# This catches dependency conflicts early without burning compute.
-# The AML Docker image is built separately when the CT job first runs.
-# ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# STAGE 2 - Package install and import check (AzDO agent - free)
+#
+# PURPOSE: Catch dependency conflicts in conda.yml BEFORE
+# registering in AML. Runs on the AzDO agent - no compute cost.
+# All install + import steps run in ONE bash script so pip
+# packages are visible to the import check in the same shell.
+# -------------------------------------------------------------
 - stage: PackageCheck
-  displayName: '② Package Check — Install & Import on AzDO Agent'
+  displayName: 'Stage 2 - Package Install and Import Verify'
   dependsOn: Validate
   condition: succeeded()
   jobs:
   - job: ValidatePackages
-    displayName: 'Install conda.yml packages on AzDO agent + verify imports'
+    displayName: 'pip install conda.yml packages and verify imports'
     timeoutInMinutes: 15
     steps:
     - checkout: self
@@ -124,7 +123,7 @@ stages:
     - script: |
         set -e
 
-        echo "=== Extracting pip packages from config/conda.yml ==="
+        echo "=== Step 1: Extract pip packages from config/conda.yml ==="
         python - << 'PYEOF'
 import yaml, sys
 
@@ -148,11 +147,11 @@ with open('/tmp/ci_requirements.txt', 'w') as f:
 PYEOF
 
         echo ""
-        echo "=== Installing packages on AzDO agent (same as AML Docker build) ==="
+        echo "=== Step 2: pip install all packages ==="
         pip install -r /tmp/ci_requirements.txt
 
         echo ""
-        echo "=== Verifying all key package imports ==="
+        echo "=== Step 3: Verify all key package imports ==="
         python - << 'PYEOF'
 import importlib, sys
 
@@ -186,22 +185,20 @@ print('conda.yml is valid and safe to register in AML')
 PYEOF
 
         echo ""
-        echo "=== Installed versions ==="
+        echo "=== Step 4: Installed versions ==="
         pip list | grep -iE "numpy|pandas|scikit|mlflow|optuna|pandera|shap|lime|evidently"
 
         echo ""
-        echo "=== Dependency conflict check ==="
-        pip check && echo "No conflicts found" || echo "Warning: conflicts detected (see above)"
-      displayName: 'Install conda.yml packages + verify imports (single shell)'
+        echo "=== Step 5: Dependency conflict check ==="
+        pip check && echo "No conflicts" || echo "Warning: conflicts detected above"
+      displayName: 'Install packages and verify imports - single shell'
 
-
-
-# ──────────────────────────────────────────────────────────────────
-# STAGE 3: DEV — register environment spec in AML
-# (AzDO agent calls az ml — no compute cluster used)
-# ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# STAGE 3 - DEV: Register environment spec in AML
+# (AzDO agent calls az ml - no compute cluster)
+# -------------------------------------------------------------
 - stage: CI_Dev
-  displayName: '③ DEV — Register Environment in AML'
+  displayName: 'Stage 3 - DEV Register Environment in AML'
   dependsOn: PackageCheck
   condition: succeeded()
   jobs:
@@ -211,7 +208,7 @@ PYEOF
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'az ml environment create (DEV)'
+      displayName: 'az ml environment create DEV'
       name: createEnvDev
       inputs:
         azureSubscription: 'Azure ML Connection'
@@ -227,11 +224,10 @@ PYEOF
             --workspace-name $(devWS) \
             --query version -o tsv)
 
-          echo "Environment registered: $(environmentName) v$ENV_VERSION"
-          echo "AML will build the Docker image lazily when the CT training job runs."
+          echo "Registered: $(environmentName) version $ENV_VERSION"
+          echo "AML will build Docker image lazily when CT training job runs."
           echo "##vso[task.setvariable variable=ENV_VERSION;isOutput=true]$ENV_VERSION"
 
-          # Confirm it's registered
           az ml environment show \
             --name $(environmentName) \
             --label latest \
@@ -240,7 +236,7 @@ PYEOF
             --query "{name:name, version:version}" -o table
 
     - script: |
-        echo "Environment version: $(createEnvDev.ENV_VERSION)" > env_version.txt
+        echo "Environment version $(createEnvDev.ENV_VERSION)" > env_version.txt
       displayName: 'Record environment version'
 
     - task: PublishPipelineArtifact@1
@@ -249,16 +245,16 @@ PYEOF
         artifact: 'environment-version'
       displayName: 'Publish env version for CT pipeline'
 
-# ──────────────────────────────────────────────────────────────────
-# STAGE 4: QA — manual gate → propagate
-# ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# STAGE 4 - QA: Manual gate then propagate
+# -------------------------------------------------------------
 - stage: CI_QA
-  displayName: '④ QA — Propagate Environment'
+  displayName: 'Stage 4 - QA Propagate Environment'
   dependsOn: CI_Dev
   condition: succeeded()
   jobs:
   - job: ApprovalGate_QA
-    displayName: 'Manual Approval: DEV → QA'
+    displayName: 'Manual Approval DEV to QA'
     pool: server
     steps:
     - task: ManualValidation@0
@@ -266,8 +262,8 @@ PYEOF
         notifyUsers: 'suriya.divi@outlook.com'
         instructions: |
           CI package check passed on AzDO agent.
-          Environment "$(environmentName)" registered in logistic-regression-ws.
-          Approve to propagate the same spec to logistic-regression-qa.
+          Environment registered in logistic-regression-ws.
+          Approve to propagate same spec to logistic-regression-qa.
         onTimeout: 'reject'
         timeout: '1440'
 
@@ -278,7 +274,7 @@ PYEOF
     steps:
     - checkout: self
     - task: AzureCLI@2
-      displayName: 'az ml environment create (QA)'
+      displayName: 'az ml environment create QA'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -295,16 +291,16 @@ PYEOF
             --query "{name:name, version:version}" -o table
           echo "Environment registered in QA"
 
-# ──────────────────────────────────────────────────────────────────
-# STAGE 5: PROD — manual gate → propagate
-# ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# STAGE 5 - PROD: Manual gate then propagate
+# -------------------------------------------------------------
 - stage: CI_Prod
-  displayName: '⑤ PROD — Propagate Environment'
+  displayName: 'Stage 5 - PROD Propagate Environment'
   dependsOn: CI_QA
   condition: succeeded()
   jobs:
   - job: ApprovalGate_Prod
-    displayName: 'Manual Approval: QA → PROD'
+    displayName: 'Manual Approval QA to PROD'
     pool: server
     steps:
     - task: ManualValidation@0
@@ -323,7 +319,7 @@ PYEOF
     steps:
     - checkout: self
     - task: AzureCLI@2
-      displayName: 'az ml environment create (PROD)'
+      displayName: 'az ml environment create PROD'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -339,15 +335,16 @@ PYEOF
             --resource-group $(prodRG) --workspace-name $(prodWS) \
             --query "{name:name, version:version}" -o table
 
-          python -c "
-          import json, datetime
-          print(json.dumps({
-            'propagated_at': datetime.datetime.utcnow().isoformat(),
-            'environment': '$(environmentName)',
-            'pipeline_build': '$(Build.BuildNumber)',
-            'git_commit': '$(Build.SourceVersion)'
-          }, indent=2))
-          " > env_propagation_record.json
+          python3 -c "
+import json, datetime
+record = {
+    'propagated_at': datetime.datetime.utcnow().isoformat(),
+    'environment': '$(environmentName)',
+    'pipeline_build': '$(Build.BuildNumber)',
+    'git_commit': '$(Build.SourceVersion)'
+}
+print(json.dumps(record, indent=2))
+" > env_propagation_record.json
 
     - task: PublishBuildArtifacts@1
       inputs:
