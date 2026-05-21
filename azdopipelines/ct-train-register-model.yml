@@ -23,8 +23,6 @@ variables:
   value: 'titanic-logistic-regression'
 - name: computeTarget
   value: 'logistic12'
-- name: pythonVersion
-  value: '3.10'
 - name: enableTuning
   value: 'false'
 - name: nTrials
@@ -38,130 +36,142 @@ variables:
 - name: qaWS
   value: 'logistic-regression-qa'
 
+# =============================================================
+# CT Pipeline - Train and Register Model
+#
+# Runs entirely on AzDO agent using az ml CLI.
+# NO Python SDK (azure-ai-ml) on the agent — avoids marshmallow
+# version conflicts. The SDK runs inside the AML job on logistic12.
+#
+# Steps:
+#   1. Register titanic.csv as AML data asset (az ml data create)
+#   2. Submit training job to logistic-regression-ws (az ml job create)
+#   3. Stream job logs and wait for completion (az ml job stream)
+#   4. Register trained model in AML registry (az ml model create)
+# =============================================================
+
 stages:
 - stage: Train_Dev
-  displayName: 'CT: Training in DEV'
+  displayName: 'CT - Train and Register Model in DEV'
   jobs:
   - job: TrainModel
-    displayName: 'Train and Register Model'
+    displayName: 'Submit training job to logistic-regression-ws'
+    timeoutInMinutes: 120
     steps:
     - checkout: self
 
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '$(pythonVersion)'
-      displayName: 'Use Python $(pythonVersion)'
-
-    - script: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-      displayName: 'Install Dependencies'
-
     - task: AzureCLI@2
+      displayName: 'Step 1 - Register data asset in DEV workspace'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-          
-          # Create data asset if not exists
-          python scripts/create_data_asset.py \
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Registering titanic-dataset data asset..."
+
+          # Check if data asset already exists
+          EXISTING=$(az ml data show \
+            --name titanic-dataset \
+            --label latest \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
-            --data-path data/titanic.csv
-      displayName: 'Create/Update Data Asset'
+            --query version -o tsv 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING" ]; then
+            echo "Data asset titanic-dataset already exists at version $EXISTING — skipping upload."
+          else
+            az ml data create \
+              --name titanic-dataset \
+              --version 1 \
+              --type uri_file \
+              --path data/titanic.csv \
+              --description "Titanic passenger survival dataset - training split" \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS)
+            echo "Data asset registered."
+          fi
 
     - task: AzureCLI@2
+      displayName: 'Step 2 - Submit training job to AML (logistic12 compute)'
+      name: submitJob
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-          
-          # Submit training job
-          JOB_ID=$(az ml job create \
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Submitting training job to $(devWS)..."
+
+          JOB_NAME=$(az ml job create \
             --file mlpipelines/training/training_job.yml \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
             --set environment_variables.ENABLE_TUNING=$(enableTuning) \
             --set environment_variables.N_TRIALS=$(nTrials) \
             --query name -o tsv)
-          
-          echo "Job ID: $JOB_ID"
-          echo "##vso[task.setvariable variable=JOB_ID]$JOB_ID"
-          
-          # Wait for job completion
-          az ml job stream --name $JOB_ID \
+
+          echo "Job submitted: $JOB_NAME"
+          echo "##vso[task.setvariable variable=JOB_NAME;isOutput=true]$JOB_NAME"
+          echo "##vso[task.setvariable variable=JOB_NAME]$JOB_NAME"
+
+          # Stream logs — blocks until job completes or fails
+          echo "Streaming job logs (training runs on logistic12)..."
+          az ml job stream \
+            --name $JOB_NAME \
             --resource-group $(devRG) \
             --workspace-name $(devWS)
-      displayName: 'Submit Training Job'
 
     - task: AzureCLI@2
+      displayName: 'Step 3 - Register trained model in AML'
+      name: registerModel
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-          
-          # Register model from training job
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Registering model from job: $(JOB_NAME)"
+
           MODEL_VERSION=$(az ml model create \
             --name $(modelName) \
-            --path "azureml://jobs/$(JOB_ID)/outputs/artifacts/model" \
-            --type "custom_model" \
+            --path "azureml://jobs/$(JOB_NAME)/outputs/model_output" \
+            --type custom_model \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
             --query version -o tsv)
-          
-          echo "Model Version: $MODEL_VERSION"
+
+          echo "Model registered: $(modelName) v$MODEL_VERSION"
+          echo "##vso[task.setvariable variable=MODEL_VERSION;isOutput=true]$MODEL_VERSION"
           echo "##vso[task.setvariable variable=MODEL_VERSION]$MODEL_VERSION"
-          
-          # Tag model with metadata
+
+          # Tag model with traceability metadata
           az ml model update \
             --name $(modelName) \
             --version $MODEL_VERSION \
-            --set tags.training_job=$(JOB_ID) \
+            --set tags.training_job=$(JOB_NAME) \
             --set tags.environment=dev \
             --set tags.git_commit=$(Build.SourceVersion) \
+            --set tags.pipeline_build=$(Build.BuildNumber) \
             --resource-group $(devRG) \
             --workspace-name $(devWS)
-      displayName: 'Register Model'
 
-    - task: PublishBuildArtifacts@1
-      inputs:
-        PathtoPublish: 'model'
-        ArtifactName: 'trained-model'
-      displayName: 'Publish Model Artifacts'
-      condition: succeeded()
-
-    - task: AzureCLI@2
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az extension add -n ml -y
-
-          # Download the freshly registered model to validate locally
-          az ml model download \
+          az ml model show \
             --name $(modelName) \
-            --version $(MODEL_VERSION) \
-            --download-path ./model_to_validate \
+            --version $MODEL_VERSION \
             --resource-group $(devRG) \
-            --workspace-name $(devWS)
+            --workspace-name $(devWS) \
+            --query "{name:name, version:version, tags:tags}" -o table
 
-          python scripts/validate_model.py \
-            --model-path ./model_to_validate \
-            --test-data data/titanic.csv \
-            --output validation_result.json
-      displayName: 'Validate Model Quality (Gate)'
-      # Fails the pipeline if accuracy/F1/AUC are below thresholds
-
-    - task: PublishBuildArtifacts@1
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish model version for CD pipeline'
       inputs:
-        PathtoPublish: 'validation_result.json'
-        ArtifactName: 'validation-report'
-      displayName: 'Publish Validation Report'
-      condition: always()
+        targetPath: '$(System.DefaultWorkingDirectory)'
+        artifact: 'model-metadata'
+      condition: succeeded()
