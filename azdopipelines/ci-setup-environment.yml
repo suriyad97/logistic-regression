@@ -101,24 +101,57 @@ stages:
           echo "##vso[task.setvariable variable=ENV_VERSION;isOutput=true]$ENV_VERSION"
 
     - task: AzureCLI@2
-      displayName: 'Wait for DEV Docker image build (max 25 min)'
+      displayName: 'Trigger + wait for Docker image build via smoke-test job'
+      timeoutInMinutes: 30
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
           az extension add -n ml -y --allow-preview true
-          for i in $(seq 1 50); do
-            STATUS=$(az ml environment show \
-              --name $(environmentName) --label latest \
-              --resource-group $(devRG) --workspace-name $(devWS) \
-              --query "stage" -o tsv 2>/dev/null || echo "Pending")
-            echo "[$i/50] $STATUS"
-            [ "$STATUS" = "Succeeded" ] && echo "Build OK" && exit 0
-            [ "$STATUS" = "Failed"    ] && echo "Build FAILED" && exit 1
+
+          # AML builds Docker images lazily — the image is built when a job
+          # first uses the environment. Submit a minimal smoke-test job
+          # (just "python --version") to force the image build, then poll
+          # the job status. When the job succeeds/fails, the image is built.
+
+          echo "=== Submitting smoke-test job to trigger Docker image build ==="
+          JOB_NAME=$(az ml job create \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --set "display_name=ci-smoke-test-$(Build.BuildNumber)" \
+            --set "experiment_name=ci-environment-validation" \
+            --set "environment=azureml:$(environmentName)@latest" \
+            --set "compute=azureml:logistic12" \
+            --set "command=python --version && python -c 'import sklearn,mlflow,pandera,shap,lime,evidently,optuna; print(\"All packages OK\")'" \
+            --set "code=./src" \
+            --query name -o tsv)
+
+          echo "Smoke-test job: $JOB_NAME"
+
+          # Poll until job completes (success = image built OK, fail = image broken)
+          for i in $(seq 1 60); do
+            STATUS=$(az ml job show \
+              --name $JOB_NAME \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --query status -o tsv 2>/dev/null || echo "Unknown")
+            echo "  [$i/60] Job status: $STATUS"
+
+            if [ "$STATUS" = "Completed" ]; then
+              echo "✅ Smoke-test passed — Docker image built and all packages importable"
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Canceled" ]; then
+              echo "❌ Smoke-test FAILED ($STATUS) — check environment packages"
+              az ml job show --name $JOB_NAME \
+                --resource-group $(devRG) --workspace-name $(devWS) \
+                --query error -o json
+              exit 1
+            fi
             sleep 30
           done
-          echo "Timed out"; exit 1
+          echo "⚠️  Timed out after 30 min"; exit 1
+
 
     - task: AzureCLI@2
       displayName: 'Validate DEV environment'
