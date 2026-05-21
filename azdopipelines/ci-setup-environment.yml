@@ -122,75 +122,79 @@ stages:
       displayName: 'Use Python 3.10'
 
     - script: |
+        set -e
+
         echo "=== Extracting pip packages from config/conda.yml ==="
-        python -c "
-        import yaml, sys
+        python - << 'PYEOF'
+import yaml, sys
 
-        with open('config/conda.yml') as f:
-            conda = yaml.safe_load(f)
+with open('config/conda.yml') as f:
+    conda = yaml.safe_load(f)
 
-        pip_packages = []
-        for dep in conda.get('dependencies', []):
-            if isinstance(dep, dict) and 'pip' in dep:
-                for pkg in dep['pip']:
-                    # Skip comment lines
-                    stripped = pkg.strip()
-                    if stripped and not stripped.startswith('#'):
-                        pip_packages.append(stripped)
+pip_packages = []
+for dep in conda.get('dependencies', []):
+    if isinstance(dep, dict) and 'pip' in dep:
+        for pkg in dep['pip']:
+            stripped = pkg.strip()
+            if stripped and not stripped.startswith('#'):
+                pip_packages.append(stripped)
 
-        print(f'Found {len(pip_packages)} pip packages:')
-        for p in pip_packages:
-            print(f'  {p}')
+print(f'Found {len(pip_packages)} pip packages:')
+for p in pip_packages:
+    print(f'  {p}')
 
-        with open('/tmp/ci_requirements.txt', 'w') as f:
-            f.write('\n'.join(pip_packages))
-        "
-        echo "=== Installing packages (this is what AML will do in Docker) ==="
-        pip install -r /tmp/ci_requirements.txt --quiet
-        echo "Install complete"
-      displayName: 'Install all conda.yml pip packages'
+with open('/tmp/ci_requirements.txt', 'w') as f:
+    f.write('\n'.join(pip_packages))
+PYEOF
 
-    - script: |
-        echo "=== Verifying all key packages import correctly ==="
-        python -c "
-        import importlib, sys
+        echo ""
+        echo "=== Installing packages on AzDO agent (same as AML Docker build) ==="
+        pip install -r /tmp/ci_requirements.txt
 
-        packages = {
-            'numpy':      'numpy',
-            'pandas':     'pandas',
-            'sklearn':    'scikit-learn',
-            'mlflow':     'mlflow',
-            'optuna':     'optuna',
-            'pandera':    'pandera',
-            'shap':       'shap',
-            'lime':       'lime',
-            'evidently':  'evidently',
-        }
+        echo ""
+        echo "=== Verifying all key package imports ==="
+        python - << 'PYEOF'
+import importlib, sys
 
-        failed = []
-        for module, pkg in packages.items():
-            try:
-                importlib.import_module(module)
-                print(f'  OK  {pkg}')
-            except ImportError as e:
-                failed.append(f'  FAIL {pkg}: {e}')
+packages = {
+    'numpy':     'numpy',
+    'pandas':    'pandas',
+    'sklearn':   'scikit-learn',
+    'mlflow':    'mlflow',
+    'optuna':    'optuna',
+    'pandera':   'pandera',
+    'shap':      'shap',
+    'lime':      'lime',
+    'evidently': 'evidently',
+}
 
-        if failed:
-            print('\nFailed imports:')
-            print('\n'.join(failed))
-            sys.exit(1)
+failed = []
+for module, pkg in packages.items():
+    try:
+        importlib.import_module(module)
+        print(f'  OK  {pkg}')
+    except ImportError as e:
+        failed.append(f'  FAIL {pkg}: {e}')
 
-        print(f'\nAll {len(packages)} packages imported successfully')
-        print('conda.yml is valid — safe to register in AML')
-        "
-      displayName: 'Verify all package imports'
+if failed:
+    print('\nFailed imports:')
+    print('\n'.join(failed))
+    sys.exit(1)
 
-    - script: |
-        echo "=== Checking for version conflicts ==="
-        pip check || true
+print(f'\nAll {len(packages)} packages imported successfully')
+print('conda.yml is valid and safe to register in AML')
+PYEOF
+
+        echo ""
         echo "=== Installed versions ==="
-        pip list | grep -E "numpy|pandas|scikit|mlflow|optuna|pandera|shap|lime|evidently"
-      displayName: 'Report installed versions'
+        pip list | grep -iE "numpy|pandas|scikit|mlflow|optuna|pandera|shap|lime|evidently"
+
+        echo ""
+        echo "=== Dependency conflict check ==="
+        pip check && echo "No conflicts found" || echo "Warning: conflicts detected (see above)"
+      displayName: 'Install conda.yml packages + verify imports (single shell)'
+
+
 
 # ──────────────────────────────────────────────────────────────────
 # STAGE 3: DEV — register environment spec in AML
