@@ -263,15 +263,7 @@ stages:
             --workspace-name $(prodWS) \
             --query "{name:name, version:version, image:image}" -o table
 
-          python3 -c "
-import json, datetime
-print(json.dumps({
-  'promoted_at': datetime.datetime.utcnow().isoformat(),
-  'image': '$PROD_IMAGE',
-  'build_id': '$(Build.BuildId)',
-  'commit': '$(Build.SourceVersion)'
-}, indent=2))
-" > env_audit.json
+          echo "{\"promoted_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"image\": \"$PROD_IMAGE\", \"build\": \"$(Build.BuildId)\"}" > env_audit.json
 
     - task: PublishBuildArtifacts@1
       inputs:
