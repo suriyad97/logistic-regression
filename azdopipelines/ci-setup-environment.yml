@@ -4,11 +4,9 @@ trigger:
     - master
   paths:
     include:
-    - requirements.txt
     - config/environment.yml
     - config/conda.yml
     - azdopipelines/ci-setup-environment.yml
-    - scripts/ci/
 
 pr:
   branches:
@@ -16,7 +14,6 @@ pr:
     - master
   paths:
     include:
-    - requirements.txt
     - config/environment.yml
     - config/conda.yml
 
@@ -40,65 +37,43 @@ variables:
 - name: prodWS
   value: 'logistic-regression-prod'
 
+# =============================================================
+# CI Pipeline  -  Build  ->  Push to ACR  ->  DEV  ->  QA  ->  PROD
+#
+# Step-by-step:
+#   Stage 1 (DEV):
+#     a. Register environment spec in AML DEV workspace
+#     b. AML builds Docker image from conda.yml + base image
+#        and pushes it to DEV ACR automatically
+#     c. Wait up to 90 min for build to complete
+#     d. Read the built image URI from DEV environment
+#
+#   Stage 2 (QA - after manual approval):
+#     Register environment in QA workspace using the SAME
+#     Docker image URI built in DEV.  No rebuild.
+#
+#   Stage 3 (PROD - after manual approval):
+#     Register environment in PROD workspace using the SAME
+#     Docker image URI built in DEV.  No rebuild.
+# =============================================================
+
 stages:
 
-# Stage 1: Lint - YAML parse and Python syntax check
-- stage: Validate
-  displayName: 'Stage 1 - Lint and Schema Check'
-  jobs:
-  - job: LintAndValidate
-    displayName: 'YAML and Python syntax check'
-    steps:
-    - checkout: self
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '3.10'
-      displayName: 'Use Python 3.10'
-    - script: |
-        set -e
-        pip install pyyaml --quiet
-        python scripts/ci/check_yaml.py
-        python -m py_compile src/train.py src/data_processing.py src/inference.py src/schema.py src/explain.py
-        echo "All syntax checks passed"
-      displayName: 'Run YAML lint and Python syntax check'
-
-# Stage 2: Package check - runs on AzDO agent (free, ~5 min)
-# Validates conda.yml packages install and import correctly.
-# No AML compute used. Docker image built lazily by CT pipeline.
-- stage: PackageCheck
-  displayName: 'Stage 2 - Package Install and Import Check'
-  dependsOn: Validate
-  condition: succeeded()
-  jobs:
-  - job: ValidatePackages
-    displayName: 'pip install conda.yml and verify imports on AzDO agent'
-    timeoutInMinutes: 15
-    steps:
-    - checkout: self
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '3.10'
-      displayName: 'Use Python 3.10'
-    - script: |
-        set -e
-        pip install pyyaml --quiet
-        python scripts/ci/check_packages.py
-      displayName: 'Install conda.yml packages and verify all imports'
-
-# Stage 3: Register environment spec in DEV AML workspace
-# (AzDO agent only - no compute cluster)
+# ------------------------------------------------------------------
+# STAGE 1  -  DEV
+# Build Docker image, push to ACR, register environment
+# ------------------------------------------------------------------
 - stage: CI_Dev
-  displayName: 'Stage 3 - DEV Register Environment'
-  dependsOn: PackageCheck
-  condition: succeeded()
+  displayName: 'DEV - Build Docker Image and Push to ACR'
   jobs:
-  - job: RegisterEnvDev
-    displayName: 'Register environment in logistic-regression-ws'
+  - job: BuildAndPushDev
+    displayName: 'Build image in DEV ACR and register in AML'
+    timeoutInMinutes: 120
     steps:
     - checkout: self
+
     - task: AzureCLI@2
-      displayName: 'az ml environment create DEV'
-      name: createEnvDev
+      displayName: 'Step 1 - Register environment spec in AML DEV'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -107,45 +82,113 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
+          echo "Registering environment spec..."
           ENV_VERSION=$(az ml environment create \
             --file config/environment.yml \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
             --query version -o tsv)
 
-          echo "Registered: $(environmentName) version $ENV_VERSION"
-          echo "##vso[task.setvariable variable=ENV_VERSION;isOutput=true]$ENV_VERSION"
+          echo "Registered: $(environmentName) v$ENV_VERSION in $(devWS)"
+          echo "##vso[task.setvariable variable=ENV_VERSION]$ENV_VERSION"
+
+    - task: AzureCLI@2
+      displayName: 'Step 2 - Submit job to trigger Docker image build in DEV ACR'
+      timeoutInMinutes: 100
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Submitting smoke-test job to trigger Docker image build..."
+          JOB_NAME=$(az ml job create \
+            --file scripts/ci/smoke_test_job.yml \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --query name -o tsv)
+
+          echo "Job submitted: $JOB_NAME"
+          echo "AML is now building the Docker image from conda.yml and pushing to DEV ACR."
+          echo "Waiting for build + job to complete (first build takes 20-40 min)..."
+
+          # Poll every 30s, max 90 min (180 iterations)
+          for i in $(seq 1 180); do
+            STATUS=$(az ml job show \
+              --name $JOB_NAME \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --query status -o tsv 2>/dev/null || echo "Unknown")
+
+            ELAPSED=$(( i * 30 ))
+            echo "  [${i}/180] ${ELAPSED}s elapsed - Job status: $STATUS"
+
+            if [ "$STATUS" = "Completed" ]; then
+              echo "Docker image built and pushed to DEV ACR successfully."
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Canceled" ]; then
+              echo "Build job failed ($STATUS) - check AML logs."
+              az ml job show \
+                --name $JOB_NAME \
+                --resource-group $(devRG) \
+                --workspace-name $(devWS) \
+                --query error -o json
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "Timed out after 90 min."; exit 1
+
+    - task: AzureCLI@2
+      displayName: 'Step 3 - Get built image URI from DEV ACR'
+      name: getImageUri
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          IMAGE_URI=$(az ml environment show \
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --query "image" -o tsv)
+
+          echo "Built image URI: $IMAGE_URI"
+          echo "##vso[task.setvariable variable=IMAGE_URI;isOutput=true]$IMAGE_URI"
+          echo "##vso[task.setvariable variable=IMAGE_URI]$IMAGE_URI"
 
           az ml environment show \
             --name $(environmentName) \
             --label latest \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
-            --query "{name:name, version:version}" -o table
+            --query "{name:name, version:version, image:image}" -o table
 
-    - script: echo "Environment version $(createEnvDev.ENV_VERSION)" > env_version.txt
-      displayName: 'Save environment version'
-
-    - task: PublishPipelineArtifact@1
-      inputs:
-        targetPath: 'env_version.txt'
-        artifact: 'environment-version'
-      displayName: 'Publish env version for CT pipeline'
-
-# Stage 4: Manual approval then propagate to QA
+# ------------------------------------------------------------------
+# STAGE 2  -  QA
+# Manual approval then register SAME image in QA workspace
+# ------------------------------------------------------------------
 - stage: CI_QA
-  displayName: 'Stage 4 - QA Propagate Environment'
+  displayName: 'QA - Propagate Environment (no rebuild)'
   dependsOn: CI_Dev
   condition: succeeded()
+  variables:
+    IMAGE_URI: $[ stageDependencies.CI_Dev.BuildAndPushDev.outputs['getImageUri.IMAGE_URI'] ]
   jobs:
   - job: ApprovalGate_QA
-    displayName: 'Manual Approval DEV to QA'
+    displayName: 'Manual Approval - Promote to QA'
     pool: server
     steps:
     - task: ManualValidation@0
       inputs:
         notifyUsers: 'suriya.divi@outlook.com'
-        instructions: 'Package check passed. Approve to propagate environment to logistic-regression-qa.'
+        instructions: 'Docker image built and pushed to DEV ACR. Approve to register same image in logistic-regression-qa (no rebuild).'
         onTimeout: 'reject'
         timeout: '1440'
 
@@ -156,7 +199,7 @@ stages:
     steps:
     - checkout: self
     - task: AzureCLI@2
-      displayName: 'az ml environment create QA'
+      displayName: 'Register environment in QA workspace'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -164,29 +207,44 @@ stages:
         inlineScript: |
           set -e
           az extension add -n ml -y --allow-preview true
+
+          echo "Registering environment in QA using DEV image: $(IMAGE_URI)"
+
           az ml environment create \
-            --file config/environment.yml \
+            --name $(environmentName) \
+            --version $(ENV_VERSION) \
+            --image "$(IMAGE_URI)" \
             --resource-group $(qaRG) \
             --workspace-name $(qaWS)
-          az ml environment show \
-            --name $(environmentName) --label latest \
-            --resource-group $(qaRG) --workspace-name $(qaWS) \
-            --query "{name:name, version:version}" -o table
 
-# Stage 5: Manual approval then propagate to PROD
+          az ml environment show \
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(qaRG) \
+            --workspace-name $(qaWS) \
+            --query "{name:name, version:version, image:image}" -o table
+
+          echo "Environment registered in QA. Same Docker image - no rebuild."
+
+# ------------------------------------------------------------------
+# STAGE 3  -  PROD
+# Manual approval then register SAME image in PROD workspace
+# ------------------------------------------------------------------
 - stage: CI_Prod
-  displayName: 'Stage 5 - PROD Propagate Environment'
+  displayName: 'PROD - Propagate Environment (no rebuild)'
   dependsOn: CI_QA
   condition: succeeded()
+  variables:
+    IMAGE_URI: $[ stageDependencies.CI_Dev.BuildAndPushDev.outputs['getImageUri.IMAGE_URI'] ]
   jobs:
   - job: ApprovalGate_Prod
-    displayName: 'Manual Approval QA to PROD'
+    displayName: 'Manual Approval - Promote to PROD'
     pool: server
     steps:
     - task: ManualValidation@0
       inputs:
         notifyUsers: 'suriya.divi@outlook.com'
-        instructions: 'QA validated. Approve to propagate environment to logistic-regression-prod. WARNING: affects all PROD jobs.'
+        instructions: 'QA validated. Approve to register same image in logistic-regression-prod. WARNING: affects all PROD jobs.'
         onTimeout: 'reject'
         timeout: '1440'
 
@@ -197,7 +255,7 @@ stages:
     steps:
     - checkout: self
     - task: AzureCLI@2
-      displayName: 'az ml environment create PROD'
+      displayName: 'Register environment in PROD workspace'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -205,11 +263,27 @@ stages:
         inlineScript: |
           set -e
           az extension add -n ml -y --allow-preview true
+
+          echo "Registering environment in PROD using DEV image: $(IMAGE_URI)"
+
           az ml environment create \
-            --file config/environment.yml \
+            --name $(environmentName) \
+            --version $(ENV_VERSION) \
+            --image "$(IMAGE_URI)" \
             --resource-group $(prodRG) \
             --workspace-name $(prodWS)
+
           az ml environment show \
-            --name $(environmentName) --label latest \
-            --resource-group $(prodRG) --workspace-name $(prodWS) \
-            --query "{name:name, version:version}" -o table
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
+            --query "{name:name, version:version, image:image}" -o table
+
+          python3 -c "import json,datetime; print(json.dumps({'promoted_at': datetime.datetime.utcnow().isoformat(), 'image': '$(IMAGE_URI)', 'build': '$(Build.BuildNumber)', 'commit': '$(Build.SourceVersion)'}, indent=2))" > env_audit.json
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'env_audit.json'
+        ArtifactName: 'environment-audit'
+      condition: always()

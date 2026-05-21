@@ -1,0 +1,7 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+display_name: ci-image-build-trigger
+experiment_name: ci-environment-validation
+description: "Minimal job to force AML to build the Docker image for the environment. Job itself just prints versions."
+command: python -c "import sklearn,mlflow,shap,lime,evidently,optuna,pandera; print('image OK')"
+environment: azureml:titanic-logistic-regression@latest
+compute: azureml:logistic12
