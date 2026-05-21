@@ -1,47 +1,38 @@
 $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
-
-# ─────────────────────────────────────────────────────────────────
-# Azure ML Batch Inference Job
-# Triggered by: CD (cd-inference-pipeline.yml) AZDO pipeline
-# Runs in     : PROD workspace
-# ─────────────────────────────────────────────────────────────────
+type: command
 
 display_name: titanic-batch-inference
-description: "Run batch inference with the champion model and log predictions."
-experiment_name: titanic-inference
+description: "Batch inference on unseen test data using registered model"
+experiment_name: titanic-logistic-regression
 
-compute: azureml:inference-cluster
-
+compute: azureml:logistic12
 environment: azureml:titanic-logistic-regression@latest
 
-inputs:
-  model_input:
-    type: uri_folder
-    mode: ro_mount
+code: ../../src
 
-  inference_data:
+inputs:
+  input_data:
     type: uri_file
-    path: azureml:titanic-inference-data@latest
-    mode: ro_mount
+    path: azureml://datastores/inference_data/paths/predictions/test.csv
+    mode: download
+  model_dir:
+    type: custom_model
+    path: azureml:titanic-logistic-regression@latest
+    mode: download
 
 outputs:
-  predictions_output:
+  predictions:
     type: uri_folder
-    path: azureml://datastores/workspaceblobstore/paths/predictions/titanic/${{name}}
+    path: azureml://datastores/workspaceblobstore/paths/inference/predictions/${{name}}
     mode: rw_mount
 
 command: >-
-  python inference_batch.py
-  --model-path ${{inputs.model_input}}
-  --input-data ${{inputs.inference_data}}
-  --output-path ${{outputs.predictions_output}}
-  --log-predictions true
-
-code: .
+  python inference.py
+  --model ${{inputs.model_dir}}/model.pkl
+  --preprocessor ${{inputs.model_dir}}/preprocessor.pkl
+  --input ${{inputs.input_data}}
+  --output ${{outputs.predictions}}/predictions.csv
 
 environment_variables:
   MLFLOW_TRACKING_URI: azureml
-
-resources:
-  instance_type: Standard_DS3_v2
-  instance_count: 1
+  MLFLOW_EXPERIMENT_NAME: titanic-logistic-regression
