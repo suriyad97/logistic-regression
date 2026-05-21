@@ -82,7 +82,7 @@ stages:
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'Build Docker image in DEV ACR (az acr build)'
+      displayName: 'Build Docker image on AzDO agent and push to DEV ACR'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -90,20 +90,23 @@ stages:
         inlineScript: |
           set -e
 
-          echo "=== Building Docker image using ACR managed build ==="
-          echo "Registry : $(devACR).azurecr.io"
-          echo "Image    : $(imageTag)"
-          echo "Dockerfile: Dockerfile.train"
-          echo ""
+          IMAGE="$(devACR).azurecr.io/$(imageTag)"
+          echo "=== Building Docker image on AzDO agent ==="
+          echo "Image: $IMAGE"
 
-          az acr build \
-            --registry $(devACR) \
-            --resource-group $(devRG) \
-            --image $(imageTag) \
+          # Login to DEV ACR
+          az acr login --name $(devACR) --resource-group $(devRG)
+
+          # Build image using Docker (pre-installed on Ubuntu agent)
+          docker build \
             --file Dockerfile.train \
+            --tag $IMAGE \
             .
 
-          echo "Image built and pushed: $(devACR).azurecr.io/$(imageTag)"
+          # Push to DEV ACR
+          docker push $IMAGE
+          echo "Image pushed to DEV ACR: $IMAGE"
+          echo "##vso[task.setvariable variable=FULL_IMAGE]$IMAGE"
 
     - task: AzureCLI@2
       displayName: 'Register AML environment in DEV workspace'
