@@ -111,8 +111,8 @@ stages:
             --file mlpipelines/training/training_job.yml \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
-            --set environment_variables.ENABLE_TUNING=$(enableTuning) \
-            --set environment_variables.N_TRIALS=$(nTrials) \
+            --set inputs.enable_tuning=$(enableTuning) \
+            --set inputs.n_trials=$(nTrials) \
             --query name -o tsv)
 
           echo "Job submitted: $JOB_NAME"

@@ -2,7 +2,7 @@ $schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
 type: pipeline
 
 display_name: titanic-logistic-regression-pipeline
-description: "MLOps training pipeline with per-step logs visible in AML Studio"
+description: "MLOps training pipeline - 2 steps with individual logs in AML Studio"
 experiment_name: titanic-logistic-regression
 
 settings:
@@ -19,14 +19,14 @@ inputs:
     type: string
     default: "false"
   n_trials:
-    type: integer
-    default: 50
+    type: string
+    default: "50"
   test_size:
-    type: number
-    default: 0.2
+    type: string
+    default: "0.2"
   random_state:
-    type: integer
-    default: 42
+    type: string
+    default: "42"
 
 outputs:
   model_output:
@@ -36,11 +36,11 @@ outputs:
 
 jobs:
 
-  # ─────────────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────────────
   # STEP 1: Train
-  # Click this step in AML Studio to see training logs,
-  # mlflow metrics, hyperparameter search progress etc.
-  # ─────────────────────────────────────────────────────────────────
+  # In AML Studio: click this node -> Outputs+logs -> user_logs/std_log.txt
+  # Shows: data preprocessing, training progress, MLflow metrics
+  # ────────────────────────────────────────────────────────────────
   train:
     type: command
     display_name: "Step 1 - Train Model"
@@ -64,11 +64,11 @@ jobs:
       ENABLE_TUNING: ${{parent.inputs.enable_tuning}}
       N_TRIALS: ${{parent.inputs.n_trials}}
 
-  # ─────────────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────────────
   # STEP 2: Evaluate
-  # Click this step in AML Studio to see metrics, confusion matrix,
-  # SHAP/LIME explanations, and model quality gate result.
-  # ─────────────────────────────────────────────────────────────────
+  # In AML Studio: click this node -> Outputs+logs -> user_logs/std_log.txt
+  # Shows: accuracy, F1, AUC-ROC, confusion matrix, SHAP values
+  # ────────────────────────────────────────────────────────────────
   evaluate:
     type: command
     display_name: "Step 2 - Evaluate Model"
