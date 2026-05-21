@@ -40,7 +40,7 @@ variables:
 - name: devWS
   value: 'logistic-regression-ws'
 - name: qaRG
-  value: 'ml-pipeline-rg-qa'
+  value: 'ml-pipelines-rg-qa'
 - name: qaWS
   value: 'logistic-regression-qa'
 - name: prodRG
