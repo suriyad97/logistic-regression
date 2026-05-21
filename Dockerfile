@@ -1,49 +1,50 @@
-# Multi-stage Dockerfile for ML model serving
-# Stage 1: Base image with dependencies
-FROM python:3.10-slim as base
+# ── Stage 1: build ────────────────────────────────────────────────
+FROM python:3.10-slim AS builder
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Build tools needed for shap (C++ extension)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Stage 2: Runtime image
+# ── Stage 2: runtime ──────────────────────────────────────────────
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copy Python dependencies from base
-COPY --from=base /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY --from=base /usr/local/bin /usr/local/bin
+# curl needed for HEALTHCHECK
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy application code
-COPY src/ ./src/
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
+
+# Copy application source
+COPY src/     ./src/
 COPY scripts/ ./scripts/
-COPY config/ ./config/
+COPY config/  ./config/
 
-# Create model directory
+# Model artifacts are mounted at runtime via volume / AML output
 RUN mkdir -p /model
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:$PYTHONPATH
 ENV MODEL_PATH=/model/model.pkl
 ENV PREPROCESSOR_PATH=/model/preprocessor.pkl
-ENV PORT=5000
+ENV PORT=8000
+ENV PATH=/root/.local/bin:$PATH
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
-
-# Expose port
 EXPOSE ${PORT}
 
-# Run Flask app
-CMD ["python", "scripts/app.py"]
+# Liveness probe — FastAPI /health endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# uvicorn: 2 workers, async, production mode
+CMD ["sh", "-c", "uvicorn scripts.app:app --host 0.0.0.0 --port ${PORT} --workers 2 --log-level info"]

@@ -1,7 +1,7 @@
 $schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
 
 name: titanic-logistic-regression
-version: 1
+version: 2
 description: "Python environment for Titanic logistic regression MLOps pipeline"
 
 image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest
