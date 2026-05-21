@@ -1,11 +1,10 @@
 trigger:
   branches:
     include:
-    - main
+    - master
   paths:
     include:
     - src/
-    - data/
     - azdopipelines/ct-train-register-model.yml
   exclude:
     - README.md
@@ -17,14 +16,25 @@ pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  pythonVersion: '3.12'
-  environmentName: 'titanic-logistic-regression'
-  modelName: 'titanic-logistic-regression'
-  computeTarget: 'logistic12'
-  # Optuna tuning toggle — set to 'true' in the AzDO variable group for
-  # drift-triggered retrains; 'false' for fast CI validation runs
-  enableTuning: 'false'
-  nTrials: '50'
+- group: ml-pipeline-vars
+- name: environmentName
+  value: 'titanic-logistic-regression'
+- name: modelName
+  value: 'titanic-logistic-regression'
+- name: computeTarget
+  value: 'logistic12'
+- name: enableTuning
+  value: 'false'
+- name: nTrials
+  value: '50'
+- name: devRG
+  value: 'ml-pipeline-rg'
+- name: devWS
+  value: 'logistic-regression-ws'
+- name: qaRG
+  value: 'ml-pipeline-rg-qa'
+- name: qaWS
+  value: 'logistic-regression-qa'
 
 stages:
 - stage: Train_Dev
@@ -55,8 +65,8 @@ stages:
           
           # Create data asset if not exists
           python scripts/create_data_asset.py \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --data-path data/titanic.csv
       displayName: 'Create/Update Data Asset'
 
@@ -71,8 +81,8 @@ stages:
           # Submit training job
           JOB_ID=$(az ml job create \
             --file mlpipelines/training/training_job.yml \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --set environment_variables.ENABLE_TUNING=$(enableTuning) \
             --set environment_variables.N_TRIALS=$(nTrials) \
             --query name -o tsv)
@@ -82,8 +92,8 @@ stages:
           
           # Wait for job completion
           az ml job stream --name $JOB_ID \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
       displayName: 'Submit Training Job'
 
     - task: AzureCLI@2
@@ -99,8 +109,8 @@ stages:
             --name $(modelName) \
             --path "azureml://jobs/$(JOB_ID)/outputs/artifacts/model" \
             --type "custom_model" \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --query version -o tsv)
           
           echo "Model Version: $MODEL_VERSION"
@@ -113,8 +123,8 @@ stages:
             --set tags.training_job=$(JOB_ID) \
             --set tags.environment=dev \
             --set tags.git_commit=$(Build.SourceVersion) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
       displayName: 'Register Model'
 
     - task: PublishBuildArtifacts@1
@@ -137,8 +147,8 @@ stages:
             --name $(modelName) \
             --version $(MODEL_VERSION) \
             --download-path ./model_to_validate \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
 
           python scripts/validate_model.py \
             --model-path ./model_to_validate \

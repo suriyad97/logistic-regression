@@ -5,7 +5,7 @@ schedules:
   displayName: 'Daily Inference at 2 AM UTC'
   branches:
     include:
-    - main
+    - master
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -45,8 +45,8 @@ stages:
           # Get champion model
           CHAMPION_VERSION=$(az ml model list \
             --name $(modelName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
             --query "[0].version" -o tsv)
           
           echo "Champion Version: $CHAMPION_VERSION"
@@ -57,8 +57,8 @@ stages:
             --name $(modelName) \
             --version $CHAMPION_VERSION \
             --download-path ./prod_model \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS)
       displayName: 'Download Champion Model'
 
     - script: |
@@ -79,8 +79,8 @@ stages:
           # Upload predictions to data asset
           python scripts/upload_predictions.py \
             --predictions-path ./predictions \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
             --environment prod
       displayName: 'Log Predictions for Monitoring'
 

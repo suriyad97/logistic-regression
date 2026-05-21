@@ -5,7 +5,7 @@ schedules:
   displayName: 'Daily Drift Detection at 6 AM UTC'
   branches:
     include:
-    - main
+    - master
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -46,8 +46,8 @@ stages:
         scriptLocation: 'inlineScript'
         inlineScript: |
           python scripts/get_baseline_data.py \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --model-name $(modelName) \
             --output baseline_stats.json
       displayName: 'Retrieve Baseline Statistics'
@@ -65,8 +65,8 @@ stages:
 
           PRED_VERSION=$(az ml data list \
             --name titanic-predictions \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
             --query "[0].version" -o tsv)
 
           echo "Downloading predictions version: $PRED_VERSION"
@@ -74,8 +74,8 @@ stages:
             --name titanic-predictions \
             --version $PRED_VERSION \
             --download-path ./predictions \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS)
       displayName: 'Download Latest Production Predictions'
 
     # Download ground truth feedback if available
@@ -89,8 +89,8 @@ stages:
 
           GT_VERSION=$(az ml data list \
             --name titanic-feedback \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
             --query "[0].version" -o tsv 2>/dev/null || echo "")
 
           if [ -n "$GT_VERSION" ]; then
@@ -99,8 +99,8 @@ stages:
               --name titanic-feedback \
               --version $GT_VERSION \
               --download-path ./ground_truth \
-              --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-              --workspace-name $(AZURE_ML_WORKSPACE)-prod
+              --resource-group $(prodRG) \
+              --workspace-name $(prodWS)
             echo "##vso[task.setvariable variable=HAS_GROUND_TRUTH]true"
           else
             echo "No feedback data found — concept drift will be skipped"

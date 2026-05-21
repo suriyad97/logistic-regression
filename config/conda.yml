@@ -6,7 +6,7 @@ dependencies:
   - python=3.10
   - pip
   - pip:
-    # Core ML
+    # ── Core ML ──────────────────────────────────────────────────
     - numpy>=1.24,<2.0
     - pandas>=2.0,<3.0
     - scikit-learn>=1.3,<2.0
@@ -15,33 +15,32 @@ dependencies:
     - seaborn>=0.12
     - python-dotenv>=1.0
 
-    # Experiment tracking
-    # mlflow 2.7 requires Flask<3 — Flask is NOT needed in training env
+    # ── Experiment tracking ───────────────────────────────────────
+    # AML automatically injects MLFLOW_TRACKING_URI=azureml
+    # so mlflow writes directly to the AML backend — no SDK needed
     - mlflow>=2.7,<3.0
 
-    # Hyperparameter optimisation
+    # ── Hyperparameter optimisation ───────────────────────────────
     - optuna>=3.4,<4.0
 
-    # Schema validation
+    # ── Schema validation ─────────────────────────────────────────
     - pandera>=0.17,<0.20
 
-    # Explainability
+    # ── Explainability ────────────────────────────────────────────
     - shap>=0.43,<0.46
     - lime>=0.2
 
-    # Drift detection
+    # ── Drift detection ───────────────────────────────────────────
     - evidently>=0.4.16,<0.5.0
 
-    # Azure SDK
-    - azure-ai-ml>=1.10
-    - azure-identity>=1.13
-    - azure-storage-blob>=12.17
-
-    # Alerting (soft import)
-    - opencensus-ext-azure>=1.1
-
+    # ── HTTP utilities ────────────────────────────────────────────
     - requests>=2.31
 
-    # NOTE: flask + gunicorn deliberately excluded from training env.
-    # They are only needed in the inference serving container (Dockerfile),
-    # not in the AML compute training environment.
+    # NOTE: azure-ai-ml, azure-identity, azure-storage-blob,
+    #       opencensus-ext-azure are intentionally EXCLUDED from the
+    #       training environment. The Azure ML SDK has a massive
+    #       OpenTelemetry/azure-monitor dependency chain that
+    #       significantly slows Docker image builds and is not needed
+    #       for training/inference compute jobs.
+    #       These packages are only used in local scripts (scripts/)
+    #       and are installed separately via requirements.txt.

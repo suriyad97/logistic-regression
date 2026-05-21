@@ -1,310 +1,237 @@
 trigger:
   branches:
     include:
-    - main
+    - master
   paths:
     include:
     - requirements.txt
     - config/environment.yml
+    - config/conda.yml
     - azdopipelines/ci-setup-environment.yml
 
 pr:
   branches:
     include:
-    - main
+    - master
   paths:
     include:
     - requirements.txt
     - config/environment.yml
+    - config/conda.yml
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  pythonVersion: '3.12'
-  environmentName: 'titanic-logistic-regression'
-
-# ═══════════════════════════════════════════════════════════════════
-# HOW ENVIRONMENT PROMOTION WORKS
-# ───────────────────────────────
-# Azure ML environments are NOT "moved" between workspaces.
-# They are RECREATED from the same config/environment.yml definition
-# in each workspace. This guarantees:
-#   ① Identical Python packages across DEV / QA / PROD
-#   ② AML auto-increments the version in each workspace's registry
-#   ③ Any training or inference job can reference @latest and get
-#      the same image regardless of which workspace it runs in
-#
-# Promotion flow:
-#   DEV   → validate the image actually builds (AML builds Docker image)
-#   QA    → gated by ManualValidation — propagate only after DEV builds OK
-#   PROD  → gated by ManualValidation — propagate only after QA champion
-#           has been approved (env must exist in PROD before CD can run)
-# ═══════════════════════════════════════════════════════════════════
+- group: ml-pipeline-vars
+- name: environmentName
+  value: 'titanic-logistic-regression'
+- name: devRG
+  value: 'ml-pipeline-rg'
+- name: devWS
+  value: 'logistic-regression-ws'
+- name: qaRG
+  value: 'ml-pipeline-rg-qa'
+- name: qaWS
+  value: 'logistic-regression-qa'
+- name: prodRG
+  value: 'ml-pipeline-rg-prod'
+- name: prodWS
+  value: 'logistic-regression-prod'
 
 stages:
 
 # ──────────────────────────────────────────────────────────────────
-# STAGE 1: DEV — create/update the environment and wait for it to build
+# STAGE 1: Lint & validate
 # ──────────────────────────────────────────────────────────────────
-- stage: CI_Dev
-  displayName: 'CI ① DEV — Create ML Environment'
+- stage: Validate
+  displayName: '① Validate — Lint & Schema Check'
   jobs:
-  - job: CreateEnvDev
-    displayName: 'Create Environment in DEV workspace'
+  - job: LintAndValidate
     steps:
     - checkout: self
-
     - task: UsePythonVersion@0
       inputs:
-        versionSpec: '$(pythonVersion)'
-      displayName: 'Use Python $(pythonVersion)'
+        versionSpec: '3.10'
+    - script: |
+        pip install pyyaml
+        python -c "
+        import yaml, glob, sys
+        files = glob.glob('**/*.yml', recursive=True)
+        errors = []
+        for f in files:
+            try:
+                yaml.safe_load(open(f)); print(f'  OK {f}')
+            except Exception as e:
+                errors.append(f'  FAIL {f}: {e}')
+        if errors: print('\n'.join(errors)); sys.exit(1)
+        "
+        python -m py_compile src/train.py src/data_processing.py src/inference.py src/schema.py
+        echo "All syntax checks passed"
+      displayName: 'YAML + Python syntax check'
 
+# ──────────────────────────────────────────────────────────────────
+# STAGE 2: DEV — create environment
+# ──────────────────────────────────────────────────────────────────
+- stage: CI_Dev
+  displayName: '② DEV — Create Environment'
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+  - job: CreateEnvDev
+    steps:
+    - checkout: self
     - task: AzureCLI@2
+      displayName: 'Create environment in DEV (logistic-regression-ws)'
+      name: createEnvDev
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
+          az extension add -n ml -y --allow-preview true
 
-          echo "Creating/updating environment in DEV workspace..."
           ENV_VERSION=$(az ml environment create \
             --file config/environment.yml \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
-            --name $(environmentName) \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --query version -o tsv)
 
-          echo "Environment version: $ENV_VERSION"
+          echo "DEV Environment version: $ENV_VERSION"
           echo "##vso[task.setvariable variable=ENV_VERSION;isOutput=true]$ENV_VERSION"
-      displayName: 'Create Environment in DEV'
-      name: createEnvDev
-      env:
-        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
-        AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
-        AZURE_ML_WORKSPACE: $(AZURE_ML_WORKSPACE)
 
-    # Wait for AML to finish building the Docker image for this environment.
-    # This can take 5–15 minutes on first build; subsequent runs are cached.
     - task: AzureCLI@2
+      displayName: 'Wait for DEV Docker image build (max 25 min)'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-
-          ENV_VERSION=$(createEnvDev.ENV_VERSION)
-          echo "Waiting for environment $ENV_VERSION to finish building..."
-
-          # Poll build status (max 20 minutes)
-          for i in $(seq 1 40); do
+          az extension add -n ml -y --allow-preview true
+          for i in $(seq 1 50); do
             STATUS=$(az ml environment show \
-              --name $(environmentName) \
-              --version $ENV_VERSION \
-              --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-              --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+              --name $(environmentName) --label latest \
+              --resource-group $(devRG) --workspace-name $(devWS) \
               --query "stage" -o tsv 2>/dev/null || echo "Pending")
-
-            echo "  [$i/40] Build status: $STATUS"
-
-            if [ "$STATUS" == "Succeeded" ]; then
-              echo "✅ Environment build succeeded"
-              exit 0
-            elif [ "$STATUS" == "Failed" ]; then
-              echo "❌ Environment build FAILED"
-              exit 1
-            fi
+            echo "[$i/50] $STATUS"
+            [ "$STATUS" = "Succeeded" ] && echo "Build OK" && exit 0
+            [ "$STATUS" = "Failed"    ] && echo "Build FAILED" && exit 1
             sleep 30
           done
-
-          echo "⚠️  Timed out waiting for environment build (20 min)"
-          exit 1
-      displayName: 'Wait for Environment Build (DEV)'
+          echo "Timed out"; exit 1
 
     - task: AzureCLI@2
+      displayName: 'Validate DEV environment'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-
-          # Verify the environment exists and is listed
-          RESULT=$(az ml environment list \
-            --name $(environmentName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
-            --query "[0].{name:name, version:version, stage:stage}" -o json)
-
-          echo "DEV Environment: $RESULT"
-      displayName: 'Validate Environment in DEV'
-
+          az extension add -n ml -y --allow-preview true
+          az ml environment show \
+            --name $(environmentName) --label latest \
+            --resource-group $(devRG) --workspace-name $(devWS) \
+            --query "{name:name,version:version,stage:stage}" -o json
 
 # ──────────────────────────────────────────────────────────────────
-# STAGE 2: QA — propagate the same environment definition to QA
-#          Gated by manual approval so ML lead can review DEV build
+# STAGE 3: QA — manual gate then propagate
 # ──────────────────────────────────────────────────────────────────
 - stage: CI_QA
-  displayName: 'CI ② QA — Propagate Environment'
+  displayName: '③ QA — Propagate Environment'
   dependsOn: CI_Dev
   condition: succeeded()
   jobs:
-
-  # Manual gate: ML lead verifies DEV environment built cleanly
   - job: ApprovalGate_QA
-    displayName: 'Approval: Propagate env DEV → QA'
-    pool: server    # agentless job — required for ManualValidation
-    steps:
-    - task: ManualValidation@0
-      inputs:
-        notifyUsers: 'suriya.divi@outlook.com'
-        instructions: |
-          DEV environment "$(environmentName)" built successfully.
-          Review the environment in AML Studio DEV workspace, then approve
-          to propagate the same definition to the QA workspace.
-        onTimeout: 'reject'
-        timeout: '1440'   # 24 hours to approve
-      displayName: 'Manual Approval — DEV → QA'
-
-  - job: CreateEnvQA
-    displayName: 'Create Environment in QA workspace'
-    dependsOn: ApprovalGate_QA
-    condition: succeeded()
-    steps:
-    - checkout: self
-
-    - task: AzureCLI@2
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az extension add -n ml -y
-
-          echo "Propagating environment to QA workspace..."
-          az ml environment create \
-            --file config/environment.yml \
-            --resource-group $(AZURE_RESOURCE_GROUP)-qa \
-            --workspace-name $(AZURE_ML_WORKSPACE)-qa \
-            --name $(environmentName)
-
-          echo "✅ Environment created in QA"
-      displayName: 'Create Environment in QA'
-      env:
-        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
-        AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
-        AZURE_ML_WORKSPACE: $(AZURE_ML_WORKSPACE)
-
-    - task: AzureCLI@2
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az extension add -n ml -y
-
-          RESULT=$(az ml environment list \
-            --name $(environmentName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-qa \
-            --workspace-name $(AZURE_ML_WORKSPACE)-qa \
-            --query "[0].{name:name, version:version}" -o json)
-
-          echo "QA Environment: $RESULT"
-      displayName: 'Validate Environment in QA'
-
-
-# ──────────────────────────────────────────────────────────────────
-# STAGE 3: PROD — propagate to PROD only after QA has been validated
-#          This must complete BEFORE the CD inference pipeline runs.
-#          Typically triggered after a successful QA champion approval.
-# ──────────────────────────────────────────────────────────────────
-- stage: CI_Prod
-  displayName: 'CI ③ PROD — Propagate Environment'
-  dependsOn: CI_QA
-  condition: succeeded()
-  jobs:
-
-  - job: ApprovalGate_Prod
-    displayName: 'Approval: Propagate env QA → PROD'
+    displayName: 'Manual Approval: DEV → QA'
     pool: server
     steps:
     - task: ManualValidation@0
       inputs:
         notifyUsers: 'suriya.divi@outlook.com'
         instructions: |
-          QA environment "$(environmentName)" is validated.
-          Approve to propagate the same environment to the PROD workspace.
-          WARNING: This will affect all future PROD inference and monitoring jobs.
+          DEV environment "$(environmentName)" built successfully in logistic-regression-ws.
+          Approve to propagate to logistic-regression-qa.
         onTimeout: 'reject'
         timeout: '1440'
-      displayName: 'Manual Approval — QA → PROD'
+
+  - job: CreateEnvQA
+    dependsOn: ApprovalGate_QA
+    condition: succeeded()
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      displayName: 'Create environment in QA (logistic-regression-qa)'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y --allow-preview true
+          az ml environment create \
+            --file config/environment.yml \
+            --resource-group $(qaRG) \
+            --workspace-name $(qaWS)
+          az ml environment show \
+            --name $(environmentName) --label latest \
+            --resource-group $(qaRG) --workspace-name $(qaWS) \
+            --query "{name:name,version:version,stage:stage}" -o json
+
+# ──────────────────────────────────────────────────────────────────
+# STAGE 4: PROD — manual gate then propagate
+# ──────────────────────────────────────────────────────────────────
+- stage: CI_Prod
+  displayName: '④ PROD — Propagate Environment'
+  dependsOn: CI_QA
+  condition: succeeded()
+  jobs:
+  - job: ApprovalGate_Prod
+    displayName: 'Manual Approval: QA → PROD'
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'suriya.divi@outlook.com'
+        instructions: |
+          QA environment validated. Approve to propagate to logistic-regression-prod.
+          WARNING: affects all PROD inference jobs.
+        onTimeout: 'reject'
+        timeout: '1440'
 
   - job: CreateEnvProd
-    displayName: 'Create Environment in PROD workspace'
     dependsOn: ApprovalGate_Prod
     condition: succeeded()
     steps:
     - checkout: self
-
     - task: AzureCLI@2
+      displayName: 'Create environment in PROD (logistic-regression-prod)'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az extension add -n ml -y
-
-          echo "Propagating environment to PROD workspace..."
+          az extension add -n ml -y --allow-preview true
           az ml environment create \
             --file config/environment.yml \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
-            --name $(environmentName)
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS)
+          az ml environment show \
+            --name $(environmentName) --label latest \
+            --resource-group $(prodRG) --workspace-name $(prodWS) \
+            --query "{name:name,version:version,stage:stage}" -o json
 
-          echo "✅ Environment created in PROD"
-      displayName: 'Create Environment in PROD'
-      env:
-        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
-        AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
-        AZURE_ML_WORKSPACE: $(AZURE_ML_WORKSPACE)
-
-    - task: AzureCLI@2
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az extension add -n ml -y
-
-          RESULT=$(az ml environment list \
-            --name $(environmentName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
-            --query "[0].{name:name, version:version}" -o json)
-
-          echo "PROD Environment: $RESULT"
-
-          # Write a propagation record for audit trail
+          # Audit record
           python -c "
           import json, datetime
-          record = {
+          print(json.dumps({
             'propagated_at': datetime.datetime.utcnow().isoformat(),
             'environment': '$(environmentName)',
-            'source': 'qa',
-            'destination': 'prod',
             'pipeline_build': '$(Build.BuildNumber)',
             'git_commit': '$(Build.SourceVersion)'
-          }
-          print(json.dumps(record, indent=2))
+          }, indent=2))
           " > env_propagation_record.json
-          cat env_propagation_record.json
-      displayName: 'Validate Environment in PROD + Write Audit Record'
 
     - task: PublishBuildArtifacts@1
       inputs:
         PathtoPublish: 'env_propagation_record.json'
         ArtifactName: 'env-propagation-audit'
-      displayName: 'Publish Propagation Audit Record'
       condition: always()

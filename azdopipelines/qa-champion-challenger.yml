@@ -39,8 +39,8 @@ stages:
           # Get latest model from DEV (Challenger)
           CHALLENGER_VERSION=$(az ml model list \
             --name $(modelName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
             --query "[0].version" -o tsv)
           
           echo "Challenger Model Version: $CHALLENGER_VERSION"
@@ -51,8 +51,8 @@ stages:
             --name $(modelName) \
             --version $CHALLENGER_VERSION \
             --download-path ./challenger_model \
-            --resource-group $(AZURE_RESOURCE_GROUP)-dev \
-            --workspace-name $(AZURE_ML_WORKSPACE)-dev
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
       displayName: 'Download Challenger Model'
 
     - task: AzureCLI@2
@@ -66,8 +66,8 @@ stages:
           # Get champion model from QA (if exists)
           CHAMPION_VERSION=$(az ml model list \
             --name $(modelName) \
-            --resource-group $(AZURE_RESOURCE_GROUP)-qa \
-            --workspace-name $(AZURE_ML_WORKSPACE)-qa \
+            --resource-group $(qaRG) \
+            --workspace-name $(qaWS) \
             --query "[0].version" -o tsv)
           
           if [ -z "$CHAMPION_VERSION" ]; then
@@ -83,8 +83,8 @@ stages:
               --name $(modelName) \
               --version $CHAMPION_VERSION \
               --download-path ./champion_model \
-              --resource-group $(AZURE_RESOURCE_GROUP)-qa \
-              --workspace-name $(AZURE_ML_WORKSPACE)-qa
+              --resource-group $(qaRG) \
+              --workspace-name $(qaWS)
           fi
       displayName: 'Download Champion Model'
 
@@ -138,10 +138,10 @@ stages:
           # Copy champion model from QA to PROD
           az ml model create \
             --name $(modelName) \
-            --path "azureml://subscriptions/$(AZURE_SUBSCRIPTION_ID)/resourceGroups/$(AZURE_RESOURCE_GROUP)-qa/providers/Microsoft.MachineLearningServices/workspaces/$(AZURE_ML_WORKSPACE)-qa/models/$(modelName)/versions/$(CHAMPION_VERSION)" \
+            --path "azureml://subscriptions/$(AZURE_SUBSCRIPTION_ID)/resourceGroups/$(qaRG)/providers/Microsoft.MachineLearningServices/workspaces/$(qaWS)/models/$(modelName)/versions/$(CHAMPION_VERSION)" \
             --type "custom_model" \
-            --resource-group $(AZURE_RESOURCE_GROUP)-prod \
-            --workspace-name $(AZURE_ML_WORKSPACE)-prod \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
             --set tags.promoted_from=qa \
             --set tags.promotion_date=$(date +%Y-%m-%d)
       displayName: 'Register Model in PROD'
