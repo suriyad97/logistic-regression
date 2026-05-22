@@ -1,3 +1,9 @@
+parameters:
+- name: modelVersion
+  displayName: 'Model Version to Deploy'
+  type: string
+  default: 'latest'
+
 trigger: none
 
 pool:
@@ -7,16 +13,20 @@ variables:
 - group: ml-pipeline-vars
 - name: devRG
   value: 'ml-pipeline-rg'
+- name: devWS
+  value: 'logistic-regression-ws'
 - name: devACR
   value: 'logistic'
 - name: modelName
   value: 'titanic-logistic-regression'
 
 # =============================================================
-# CD Pipeline - Real-Time Inference (ACI)
+# CD Pipeline - Real-Time Inference (ACI Volume Mount)
 #
-# Deploys the Docker container containing the baked-in model and 
-# FastAPI server directly to Azure Container Instances (ACI).
+# Deploys a generic Docker container to Azure Container Instances (ACI).
+# Downloads a specific version of the model from Azure ML at deploy-time,
+# places it into an Azure File Share, and mounts that share to /model
+# inside the running container.
 # =============================================================
 
 stages:
@@ -36,12 +46,40 @@ stages:
         scriptLocation: 'inlineScript'
         inlineScript: |
           set -e
+          
+          # 1. Get Azure ML extension and credentials
+          echo "=== Installing Azure ML CLI ==="
+          az extension add -n ml -y
+          
           echo "=== Fetching ACR Credentials ==="
           ACR_USERNAME=$(az acr credential show -n $(devACR) --query "username" -o tsv)
           ACR_PASSWORD=$(az acr credential show -n $(devACR) --query "passwords[0].value" -o tsv)
 
-          echo "=== Deploying Real-Time Endpoint to ACI ==="
+          # 2. Setup Storage Account / File Share
+          echo "=== Fetching ML Workspace Storage Account ==="
+          STORAGE_ACCOUNT=$(az ml workspace show -n $(devWS) -g $(devRG) --query storage_account -o tsv | awk -F'/' '{print $NF}')
+          STORAGE_KEY=$(az storage account keys list -g $(devRG) -n $STORAGE_ACCOUNT --query "[0].value" -o tsv)
           
+          SHARE_NAME="modelshare-$(Build.BuildId)"
+          echo "=== Creating File Share: $SHARE_NAME ==="
+          az storage share create --name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
+
+          # 3. Download Model and Upload to File Share
+          echo "=== Downloading Model Version: ${{ parameters.modelVersion }} ==="
+          # This downloads into ./downloaded_model/titanic-logistic-regression/
+          az ml model download --name $(modelName) --version ${{ parameters.modelVersion }} \
+            --resource-group $(devRG) --workspace-name $(devWS) --download-path ./downloaded_model
+          
+          echo "=== Uploading Model to File Share ==="
+          # The model artifact usually has the actual model inside a subdirectory (often named "model").
+          # To ensure the files match the Dockerfile expectations, we upload the contents to the root of the share.
+          az storage file upload-batch \
+            --destination $SHARE_NAME \
+            --source ./downloaded_model/$(modelName)/ \
+            --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
+
+          # 4. Deploy ACI with Volume Mount
+          echo "=== Deploying Real-Time Endpoint to ACI ==="
           az container create \
             --resource-group $(devRG) \
             --name titanic-ml-inference-api \
@@ -54,6 +92,10 @@ stages:
             --registry-login-server $(devACR).azurecr.io \
             --registry-username $ACR_USERNAME \
             --registry-password $ACR_PASSWORD \
+            --azure-file-volume-account-name $STORAGE_ACCOUNT \
+            --azure-file-volume-account-key $STORAGE_KEY \
+            --azure-file-volume-share-name $SHARE_NAME \
+            --azure-file-volume-mount-path /model \
             --no-wait
 
           echo "Deployment initiated successfully!"
