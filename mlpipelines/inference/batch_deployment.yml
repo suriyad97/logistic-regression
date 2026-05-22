@@ -5,7 +5,7 @@ model: azureml:titanic-logistic-regression@latest
 environment: azureml:titanic-logistic-regression@latest
 compute: azureml:logistic12
 resources:
-  instance_count: 2
+  instance_count: 1
 max_concurrency_per_instance: 2
 mini_batch_size: 10
 output_action: append_row
