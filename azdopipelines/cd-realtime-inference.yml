@@ -78,12 +78,16 @@ stages:
             --source ./downloaded_model/$(modelName)/ \
             --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
 
+          echo "=== Fetching Latest Docker Image Tag from ACR ==="
+          LATEST_TAG=$(az acr repository show-tags -n $(devACR) --repository $(modelName) --orderby time_desc --top 1 -o tsv)
+          echo "Found latest tag: $LATEST_TAG"
+
           # 4. Deploy ACI with Volume Mount
           echo "=== Deploying Real-Time Endpoint to ACI ==="
           az container create \
             --resource-group $(devRG) \
             --name titanic-ml-inference-api \
-            --image $(devACR).azurecr.io/$(modelName):latest \
+            --image $(devACR).azurecr.io/$(modelName):$LATEST_TAG \
             --os-type Linux \
             --cpu 1 \
             --memory 1.5 \
