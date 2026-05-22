@@ -2,7 +2,7 @@ parameters:
 - name: modelVersion
   displayName: 'Model Version to Deploy'
   type: string
-  default: 'latest'
+  default: 2
 
 trigger: none
 
