@@ -1,0 +1,4 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+name: titanic-realtime-endpoint
+auth_mode: key
+description: "Managed online endpoint for Titanic survival prediction"

@@ -15,31 +15,28 @@ variables:
   value: 'ml-pipeline-rg'
 - name: devWS
   value: 'logistic-regression-ws'
-- name: devACR
-  value: 'logistic'
 - name: modelName
   value: 'titanic-logistic-regression'
 
 # =============================================================
-# CD Pipeline - Real-Time Inference (ACI Volume Mount)
+# CD Pipeline - Real-Time Inference (Azure ML Managed Online Endpoint)
 #
-# Deploys a generic Docker container to Azure Container Instances (ACI).
-# Downloads a specific version of the model from Azure ML at deploy-time,
-# places it into an Azure File Share, and mounts that share to /model
-# inside the running container.
+# Deploys a robust, auto-scaling real-time REST endpoint using 
+# Azure ML Managed Online Endpoints with our custom Docker container.
 # =============================================================
 
 stages:
 - stage: Deploy_RealTime_API
-  displayName: 'Deploy Real-Time API to ACI'
+  displayName: 'Deploy Real-Time API to Azure ML'
   jobs:
-  - job: DeployACI
-    displayName: 'Deploy Docker Image to Azure Container Instances'
+  - job: DeployManagedEndpoint
+    displayName: 'Deploy to Managed Online Endpoint'
+    timeoutInMinutes: 60
     steps:
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'Deploy to Azure Container Instances (ACI)'
+      displayName: 'Deploy to Azure ML Managed Online Endpoint'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -47,65 +44,30 @@ stages:
         inlineScript: |
           set -e
           
-          # 1. Get Azure ML extension and credentials
           echo "=== Installing Azure ML CLI ==="
-          az extension add -n ml -y
-          
-          echo "=== Fetching ACR Credentials ==="
-          ACR_USERNAME=$(az acr credential show -n $(devACR) --query "username" -o tsv)
-          ACR_PASSWORD=$(az acr credential show -n $(devACR) --query "passwords[0].value" -o tsv)
+          az extension add -n ml -y --allow-preview true
 
-          # 2. Setup Storage Account / File Share
-          echo "=== Fetching ML Workspace Storage Account ==="
-          STORAGE_ACCOUNT=$(az ml workspace show -n $(devWS) -g $(devRG) --query storage_account -o tsv | awk -F'/' '{print $NF}')
-          STORAGE_KEY=$(az storage account keys list -g $(devRG) -n $STORAGE_ACCOUNT --query "[0].value" -o tsv)
-          
-          SHARE_NAME="modelshare-$(Build.BuildId)"
-          echo "=== Creating File Share: $SHARE_NAME ==="
-          az storage share create --name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
-
-          # 3. Download Model and Upload to File Share
-          echo "=== Downloading Model Version: ${{ parameters.modelVersion }} ==="
-          # This downloads into ./downloaded_model/titanic-logistic-regression/
-          az ml model download --name $(modelName) --version ${{ parameters.modelVersion }} \
-            --resource-group $(devRG) --workspace-name $(devWS) --download-path ./downloaded_model
-          
-          echo "=== Uploading Model to File Share ==="
-          # Azure ML model download creates nested folders (like a UUID folder). 
-          # We need to find the exact directory containing model.pkl so we upload from the correct root.
-          MODEL_DIR=$(dirname $(find ./downloaded_model -name "model.pkl" | head -n 1))
-          echo "Found model files in: $MODEL_DIR"
-          
-          az storage file upload-batch \
-            --destination $SHARE_NAME \
-            --source $MODEL_DIR \
-            --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
-
-          echo "=== Fetching Latest Docker Image Tag from ACR ==="
-          LATEST_TAG=$(az acr repository show-tags -n $(devACR) --repository $(modelName) --orderby time_desc --top 1 -o tsv)
-          echo "Found latest tag: $LATEST_TAG"
-
-          # 4. Deploy ACI with Volume Mount
-          echo "=== Deploying Real-Time Endpoint to ACI ==="
-          az container create \
+          echo "=== Creating Managed Online Endpoint ==="
+          # Creates the endpoint if it doesn't exist, updates if it does
+          az ml online-endpoint create \
+            --file mlpipelines/inference/online_endpoint.yml \
             --resource-group $(devRG) \
-            --name titanic-ml-inference-api \
-            --image $(devACR).azurecr.io/$(modelName):$LATEST_TAG \
-            --os-type Linux \
-            --cpu 1 \
-            --memory 1.5 \
-            --ports 8000 \
-            --dns-name-label titanic-api-$(Build.BuildId) \
-            --registry-login-server $(devACR).azurecr.io \
-            --registry-username $ACR_USERNAME \
-            --registry-password $ACR_PASSWORD \
-            --azure-file-volume-account-name $STORAGE_ACCOUNT \
-            --azure-file-volume-account-key $STORAGE_KEY \
-            --azure-file-volume-share-name $SHARE_NAME \
-            --azure-file-volume-mount-path /model \
-            --no-wait
+            --workspace-name $(devWS)
 
-          echo "Deployment initiated successfully!"
-          REGION=$(az group show -n $(devRG) --query location -o tsv)
-          echo "Your FastAPI endpoint will be available shortly at:"
-          echo "http://titanic-api-$(Build.BuildId).$REGION.azurecontainer.io:8000/docs"
+          echo "=== Deploying Model to Endpoint ==="
+          # Create a new deployment and route 100% of traffic to it.
+          # We dynamically inject the selected modelVersion.
+          az ml online-deployment create \
+            --file mlpipelines/inference/online_deployment.yml \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
+            --all-traffic
+
+          echo "Deployment successful!"
+          
+          # Fetch the scoring URI dynamically
+          SCORING_URI=$(az ml online-endpoint show -n titanic-realtime-endpoint -g $(devRG) -w $(devWS) --query scoring_uri -o tsv)
+          
+          echo "Your Production-Ready Endpoint is Live at:"
+          echo "$SCORING_URI"

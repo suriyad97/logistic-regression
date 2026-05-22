@@ -1,3 +1,9 @@
+parameters:
+- name: modelVersion
+  displayName: 'Model Version to Deploy'
+  type: string
+  default: 2
+
 trigger: none
 
 pool:
@@ -15,30 +21,24 @@ variables:
   value: 'azureml://datastores/inference_data/paths/predictions/test.csv'
 
 # =============================================================
-# CD Pipeline - Batch Inference
+# CD Pipeline - Batch Inference (Azure ML Managed Batch Endpoint)
 #
-# Submits an AML command job to logistic-regression-ws that:
-#   1. Downloads the registered model (model.pkl + preprocessor.pkl)
-#   2. Reads test.csv from inference_data datastore
-#   3. Runs inference.py -> produces predictions.csv
-#   4. Saves predictions to workspaceblobstore
-#
-# Triggered manually or by CT pipeline completion.
+# Deploys a massive-scale Managed Batch Endpoint, allowing asynchronous
+# processing of terabytes of data.
 # =============================================================
 
 stages:
-- stage: Inference_Dev
-  displayName: 'CD - Batch Inference in DEV workspace'
+- stage: Deploy_Batch_Endpoint
+  displayName: 'Deploy Batch Endpoint to Azure ML'
   jobs:
-  - job: RunBatchInference
-    displayName: 'Submit inference job to logistic-regression-ws'
+  - job: DeployBatch
+    displayName: 'Deploy to Managed Batch Endpoint'
     timeoutInMinutes: 60
     steps:
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'Submit batch inference job to AML'
-      name: inferenceJob
+      displayName: 'Deploy to Azure ML Managed Batch Endpoint'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
@@ -47,49 +47,37 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
-          echo "=== Submitting batch inference job ==="
-          echo "Model   : $(modelName)@latest"
-          echo "Input   : $(inputDataPath)"
-          echo "Workspace: $(devWS)"
+          echo "=== Creating Managed Batch Endpoint ==="
+          az ml batch-endpoint create \
+            --file mlpipelines/inference/batch_endpoint.yml \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
 
-          JOB_NAME=$(az ml job create \
-            --file mlpipelines/inference/inference_job.yml \
+          echo "=== Deploying Model to Batch Endpoint ==="
+          az ml batch-deployment create \
+            --file mlpipelines/inference/batch_deployment.yml \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
+            --set-default
+
+          echo "Deployment successful!"
+
+          echo "=== Testing Batch Endpoint ==="
+          echo "Invoking batch endpoint with data: $(inputDataPath)"
+          
+          JOB_NAME=$(az ml batch-endpoint invoke \
+            --name titanic-batch-endpoint \
+            --input $(inputDataPath) \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
             --query name -o tsv)
 
-          echo "Job submitted: $JOB_NAME"
-          echo "##vso[task.setvariable variable=JOB_NAME;isOutput=true]$JOB_NAME"
+          echo "Batch Inference Job submitted: $JOB_NAME"
           echo "##vso[task.setvariable variable=JOB_NAME]$JOB_NAME"
-
+          
           echo "Streaming logs..."
           az ml job stream \
             --name $JOB_NAME \
             --resource-group $(devRG) \
             --workspace-name $(devWS)
-
-    - task: AzureCLI@2
-      displayName: 'Show predictions output location'
-      condition: succeeded()
-      inputs:
-        azureSubscription: 'Azure ML Connection'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          set -e
-          az extension add -n ml -y --allow-preview true
-
-          STATUS=$(az ml job show \
-            --name $(JOB_NAME) \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query "{status:status, outputs:outputs}" -o json)
-
-          echo "=== Inference Job Complete ==="
-          echo "$STATUS"
-          echo ""
-          echo "Predictions saved to:"
-          echo "  AML Studio -> Jobs -> $(JOB_NAME) -> Outputs+logs -> predictions/predictions.csv"
-          echo ""
-          echo "Datastore path:"
-          echo "  azureml://datastores/workspaceblobstore/paths/inference/predictions/$(JOB_NAME)/predictions.csv"

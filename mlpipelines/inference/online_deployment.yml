@@ -1,0 +1,10 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: blue
+endpoint_name: titanic-realtime-endpoint
+model: azureml:titanic-logistic-regression@latest
+environment: azureml:titanic-logistic-regression@latest
+instance_type: Standard_DS2_v2
+instance_count: 1
+environment_variables:
+  # Tell Azure ML that our FastAPI container exposes port 8000
+  AZUREML_CONTAINER_HTTP_PORT: "8000"

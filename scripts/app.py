@@ -49,8 +49,23 @@ logger = logging.getLogger(__name__)
 # ── Global model state ────────────────────────────────────────────
 _inference_engine: Optional[ModelInference] = None
 _model_load_time: Optional[float] = None
-_model_path: str = os.getenv("MODEL_PATH", "/model/model.pkl")
-_preprocessor_path: str = os.getenv("PREPROCESSOR_PATH", "/model/preprocessor.pkl")
+
+# If running inside Azure ML Managed Endpoints, Azure automatically mounts the model 
+# and sets the AZUREML_MODEL_DIR environment variable.
+aml_model_dir = os.getenv("AZUREML_MODEL_DIR")
+if aml_model_dir:
+    # Depending on how the model is registered, the artifacts might be in a 'model' subfolder 
+    # or directly in the root of the mounted directory. We'll check both.
+    if os.path.exists(os.path.join(aml_model_dir, "model", "model.pkl")):
+        _model_path: str = os.path.join(aml_model_dir, "model", "model.pkl")
+        _preprocessor_path: str = os.path.join(aml_model_dir, "model", "preprocessor.pkl")
+    else:
+        _model_path: str = os.path.join(aml_model_dir, "model.pkl")
+        _preprocessor_path: str = os.path.join(aml_model_dir, "preprocessor.pkl")
+else:
+    # Local dev or custom ACI volume mount fallback
+    _model_path: str = os.getenv("MODEL_PATH", "/model/model.pkl")
+    _preprocessor_path: str = os.getenv("PREPROCESSOR_PATH", "/model/preprocessor.pkl")
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -1,0 +1,18 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
+name: main
+endpoint_name: titanic-batch-endpoint
+model: azureml:titanic-logistic-regression@latest
+environment: azureml:titanic-logistic-regression@latest
+compute: azureml:logistic12
+resources:
+  instance_count: 2
+max_concurrency_per_instance: 2
+mini_batch_size: 10
+output_action: append_row
+output_file_name: predictions.csv
+retry_settings:
+  max_retries: 3
+  timeout: 300
+code_configuration:
+  code: ../../src
+  scoring_script: score_batch.py

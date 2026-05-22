@@ -1,0 +1,4 @@
+$schema: https://azuremlschemas.azureedge.net/latest/batchEndpoint.schema.json
+name: titanic-batch-endpoint
+description: "Managed batch endpoint for massive-scale Titanic survival predictions"
+auth_mode: aad_token
