@@ -177,21 +177,6 @@ python src/evaluate.py \
 
 ## Deployment
 
-### 1. Deploy Infrastructure
-
-```bash
-# Deploy Azure ML infrastructure
-az deployment group create \
-    --name ml-deployment \
-    --resource-group <YOUR_RESOURCE_GROUP> \
-    --template-file infra/main.bicep \
-    --parameters \
-        location=eastus \
-        workspaceName=titanic-ml-ws \
-        storageAccountName=titanicml \
-        keyVaultName=titanic-kv \
-        appInsightsName=titanic-insights
-```
 
 ### 2. Build Docker Image
 

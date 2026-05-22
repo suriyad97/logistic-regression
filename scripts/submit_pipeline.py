@@ -10,7 +10,7 @@ from pathlib import Path
 from azure.ai.ml import MLClient
 from azure.ai.ml.dsl import pipeline
 from azure.ai.ml import command, load_component
-from azure.ai.ml.entities import Environment
+from azure.ai.ml.entities import Environment, BuildContext
 from azure.identity import DefaultAzureCredential
 import yaml
 
@@ -32,8 +32,8 @@ def get_ml_client(subscription_id: str, resource_group: str, workspace_name: str
     return ml_client
 
 
-def create_environment(ml_client: MLClient, env_name: str, conda_path: str) -> str:
-    """Create Azure ML environment from conda file."""
+def create_environment(ml_client: MLClient, env_name: str) -> str:
+    """Create Azure ML environment from Docker context."""
     logger.info(f"Creating environment: {env_name}")
     
     try:
@@ -46,14 +46,10 @@ def create_environment(ml_client: MLClient, env_name: str, conda_path: str) -> s
             pass
         
         # Create new environment
-        with open(conda_path, 'r') as f:
-            conda_config = yaml.safe_load(f)
-        
         env = Environment(
             name=env_name,
             description="Environment for Titanic logistic regression",
-            conda_file=conda_path,
-            image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest"
+            build=BuildContext(path=".")
         )
         
         env = ml_client.environments.create_or_update(env)
@@ -122,9 +118,6 @@ def main():
     parser.add_argument('--pipeline-path', type=str, 
                        default='pipelines/pipeline.yml',
                        help='Path to pipeline YAML')
-    parser.add_argument('--conda-path', type=str,
-                       default='config/environment.yml',
-                       help='Path to conda environment file')
     parser.add_argument('--experiment-name', type=str,
                        default='titanic-logistic-regression-exp',
                        help='Experiment name')
@@ -143,7 +136,7 @@ def main():
         logger.info("Connected to Azure ML workspace")
         
         # Create environment
-        env_name = create_environment(ml_client, 'titanic-env', args.conda_path)
+        env_name = create_environment(ml_client, 'titanic-env')
         
         # Submit pipeline
         job_id = submit_pipeline(ml_client, args.pipeline_path, args.experiment_name)

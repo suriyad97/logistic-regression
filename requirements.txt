@@ -10,6 +10,7 @@ python-dotenv>=1.0.0
 # ── Experiment tracking ───────────────────────────────────────────
 # mlflow 2.7 requires Flask<3 — pinned here for local dev consistency
 mlflow>=2.8.0      # Upgraded from 2.7 for better 3.12 support
+azureml-mlflow>=1.54.0,<2.0
 
 # ── Inference API (FastAPI replaces Flask) ────────────────────────
 fastapi>=0.115.0   # Upgraded from 0.111.0 for stability

@@ -1,0 +1,61 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: ml-pipeline-vars
+- name: devRG
+  value: 'ml-pipeline-rg'
+- name: devACR
+  value: 'logistic'
+- name: modelName
+  value: 'titanic-logistic-regression'
+
+# =============================================================
+# CD Pipeline - Real-Time Inference (ACI)
+#
+# Deploys the Docker container containing the baked-in model and 
+# FastAPI server directly to Azure Container Instances (ACI).
+# =============================================================
+
+stages:
+- stage: Deploy_RealTime_API
+  displayName: 'Deploy Real-Time API to ACI'
+  jobs:
+  - job: DeployACI
+    displayName: 'Deploy Docker Image to Azure Container Instances'
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Deploy to Azure Container Instances (ACI)'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          echo "=== Fetching ACR Credentials ==="
+          ACR_USERNAME=$(az acr credential show -n $(devACR) --query "username" -o tsv)
+          ACR_PASSWORD=$(az acr credential show -n $(devACR) --query "passwords[0].value" -o tsv)
+
+          echo "=== Deploying Real-Time Endpoint to ACI ==="
+          
+          az container create \
+            --resource-group $(devRG) \
+            --name titanic-ml-inference-api \
+            --image $(devACR).azurecr.io/$(modelName):latest \
+            --os-type Linux \
+            --cpu 1 \
+            --memory 1.5 \
+            --ports 8000 \
+            --dns-name-label titanic-api-$(Build.BuildId) \
+            --registry-login-server $(devACR).azurecr.io \
+            --registry-username $ACR_USERNAME \
+            --registry-password $ACR_PASSWORD \
+            --no-wait
+
+          echo "Deployment initiated successfully!"
+          echo "Your FastAPI endpoint will be available shortly at:"
+          echo "http://titanic-api-$(Build.BuildId).<your-azure-region>.azurecontainer.io:8000/docs"

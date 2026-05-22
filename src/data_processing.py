@@ -132,8 +132,8 @@ class DataProcessor:
         df['AgeBand'] = pd.cut(df['Age'], bins=[0, 12, 18, 35, 60, 100], 
                                 labels=['Child', 'Teenager', 'Adult', 'Middle-aged', 'Senior'])
         
-        # Create FareBand for binning fare
-        df['FareBand'] = pd.qcut(df['Fare'], q=4, labels=['Q1', 'Q2', 'Q3', 'Q4'], duplicates='drop')
+        # Create FareBand for binning fare using fixed bins (to support single-row inference)
+        df['FareBand'] = pd.cut(df['Fare'], bins=[-0.001, 7.91, 14.45, 31.0, 1000.0], labels=['Q1', 'Q2', 'Q3', 'Q4'])
 
         # Fill any NaN produced by pd.cut / pd.qcut for edge values at inference.
         # Convert to string first so fillna works regardless of existing category list.

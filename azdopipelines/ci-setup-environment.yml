@@ -6,8 +6,8 @@ pr:
     - master
   paths:
     include:
-    - config/conda.yml
-    - Dockerfile.train
+    - requirements.txt
+    - Dockerfile
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -43,7 +43,7 @@ variables:
 # CI Pipeline - Build, Push to ACR, Create AML Env, Promote
 #
 # Stage 1 - DEV:
-#   az acr build  -> builds Dockerfile.train in ACR managed infra
+#   az acr build  -> builds Dockerfile in ACR managed infra
 #                    (NO compute cluster, runs in Azure ACR service)
 #                 -> pushes image to logistic.azurecr.io
 #   az ml environment create --image -> registers built image as AML env
@@ -90,7 +90,7 @@ stages:
 
           # Build image using Docker (pre-installed on Ubuntu agent)
           docker build \
-            --file Dockerfile.train \
+            --file Dockerfile \
             --tag $IMAGE \
             .
 

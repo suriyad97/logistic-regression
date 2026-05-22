@@ -136,7 +136,7 @@ jobs:
           --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
           --name titanic-ml-inference \
           --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-          --ports 5000 \
+          --ports 8000 \
           --registry-login-server ${{ env.REGISTRY }} \
           --registry-username ${{ secrets.REGISTRY_USERNAME }} \
           --registry-password ${{ secrets.REGISTRY_PASSWORD }} \

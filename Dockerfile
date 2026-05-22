@@ -30,8 +30,8 @@ COPY src/     ./src/
 COPY scripts/ ./scripts/
 COPY config/  ./config/
 
-# Model artifacts are mounted at runtime via volume / AML output
-RUN mkdir -p /model
+# Model artifacts are baked directly into the Docker image
+COPY model/ /model/
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:$PYTHONPATH

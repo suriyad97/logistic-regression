@@ -1,9 +1,0 @@
-FROM mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest
-
-COPY config/conda.yml /tmp/conda.yml
-
-RUN conda env update -n base --file /tmp/conda.yml \
-    && conda clean -afy \
-    && pip cache purge
-
-WORKDIR /app

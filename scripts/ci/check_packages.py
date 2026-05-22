@@ -3,11 +3,10 @@ CI helper: check_packages.py
 ----------------------------
 Called from the AzDO CI pipeline Stage 2 (Package Check).
 
-1. Reads config/conda.yml and extracts all pip packages.
-2. Writes them to /tmp/ci_requirements.txt.
-3. pip-installs them (subprocess so the same interpreter is used).
-4. Imports each key package to verify no import errors.
-5. Runs pip check for dependency conflicts.
+1. Reads requirements.txt
+2. pip-installs them (subprocess so the same interpreter is used).
+3. Imports each key package to verify no import errors.
+4. Runs pip check for dependency conflicts.
 
 Exit 0 = all good.
 Exit 1 = failure with details printed to stdout.
@@ -16,31 +15,14 @@ Exit 1 = failure with details printed to stdout.
 import importlib
 import subprocess
 import sys
-import yaml
 
 
 # --------------------------------------------------------------------------
-# Step 1: Parse conda.yml and extract pip packages
+# Step 1: Locate requirements.txt
 # --------------------------------------------------------------------------
-print("=== Step 1: Extracting pip packages from config/conda.yml ===")
-with open("config/conda.yml") as f:
-    conda = yaml.safe_load(f)
+print("=== Step 1: Locating requirements.txt ===")
+req_file = "requirements.txt"
 
-pip_packages = []
-for dep in conda.get("dependencies", []):
-    if isinstance(dep, dict) and "pip" in dep:
-        for pkg in dep["pip"]:
-            stripped = pkg.strip()
-            if stripped and not stripped.startswith("#"):
-                pip_packages.append(stripped)
-
-print(f"Found {len(pip_packages)} pip packages:")
-for p in pip_packages:
-    print(f"  {p}")
-
-req_file = "/tmp/ci_requirements.txt"
-with open(req_file, "w") as f:
-    f.write("\n".join(pip_packages))
 
 # --------------------------------------------------------------------------
 # Step 2: pip install all packages
@@ -106,4 +88,4 @@ result = subprocess.run(
 if result.returncode != 0:
     print("WARNING: Dependency conflicts detected above (non-fatal)")
 
-print("\nconda.yml is valid - safe to register in AML")
+print("\nrequirements.txt is valid - safe to register in AML")
