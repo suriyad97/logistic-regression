@@ -1,8 +1,8 @@
 $schema: https://azuremlschemas.azureedge.net/latest/batchDeployment.schema.json
 name: main
 endpoint_name: titanic-batch-endpoint
-model: azureml:titanic-logistic-regression@latest
-environment: azureml:titanic-logistic-regression@latest
+model: azureml:titanic-logistic-regression:2
+environment: azureml:titanic-logistic-regression:1
 compute: azureml:logistic12
 resources:
   instance_count: 1
