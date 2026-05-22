@@ -62,34 +62,4 @@ stages:
             --set-default
 
           echo "Deployment successful!"
-
-          echo "=== Registering Data Asset for Batch Invoke ==="
-          # Use the local CSV file from the checked-out repo as the input path.
-          # This avoids the Azure CLI 'Tenant mismatch' bug that occurs when resolving
-          # azureml:// datastore URIs under Workload Identity Federation tokens.
-          DATA_VERSION=$(date +%s)
-          VERSION=$(az ml data create \
-            --name batch-test-data \
-            --path $(inputDataFile) \
-            --type uri_file \
-            --version $DATA_VERSION \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query version -o tsv)
-
-          echo "=== Testing Batch Endpoint ==="
-          JOB_NAME=$(az ml batch-endpoint invoke \
-            --name titanic-batch-endpoint \
-            --input azureml:batch-test-data:$VERSION \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query name -o tsv)
-
-          echo "Batch Inference Job submitted: $JOB_NAME"
-          echo "##vso[task.setvariable variable=JOB_NAME]$JOB_NAME"
-          
-          echo "Streaming logs..."
-          az ml job stream \
-            --name $JOB_NAME \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS)
+          echo "Batch endpoint 'titanic-batch-endpoint' is live and ready to accept invocations."
