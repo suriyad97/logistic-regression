@@ -128,10 +128,8 @@ dmypy.json
 .DS_Store
 
 # ML specific
-model/
 evaluation/
 mlflow_data/
-*.pkl
 *.joblib
 logs/
 outputs/
