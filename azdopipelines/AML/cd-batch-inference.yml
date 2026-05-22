@@ -47,13 +47,23 @@ stages:
           set -e
           az extension add -n ml -y --allow-preview true
 
-          echo "=== Creating Managed Batch Endpoint ==="
-          az ml batch-endpoint create \
-            --file mlpipelines/inference/batch_endpoint.yml \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS)
+          echo "=== Ensuring Managed Batch Endpoint Exists ==="
+          # Idempotent: only create the endpoint if it does not already exist.
+          if ! az ml batch-endpoint show \
+              --name titanic-batch-endpoint \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) > /dev/null 2>&1; then
+            echo "Endpoint not found. Creating..."
+            az ml batch-endpoint create \
+              --file mlpipelines/inference/batch_endpoint.yml \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS)
+          else
+            echo "Endpoint already exists. Skipping creation."
+          fi
 
           echo "=== Deploying Model to Batch Endpoint ==="
+          # 'batch-deployment create' overwrites if the deployment already exists.
           az ml batch-deployment create \
             --file mlpipelines/inference/batch_deployment.yml \
             --resource-group $(devRG) \
@@ -63,3 +73,4 @@ stages:
 
           echo "Deployment successful!"
           echo "Batch endpoint 'titanic-batch-endpoint' is live and ready to accept invocations."
+
