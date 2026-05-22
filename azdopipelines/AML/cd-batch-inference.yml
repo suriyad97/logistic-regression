@@ -63,13 +63,30 @@ stages:
           fi
 
           echo "=== Deploying Model to Batch Endpoint ==="
-          # 'batch-deployment create' overwrites if the deployment already exists.
-          az ml batch-deployment create \
-            --file mlpipelines/inference/batch_deployment.yml \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
-            --set-default
+          # Idempotent: use 'create' on first deploy, 'update' on subsequent deploys.
+          # az ml batch-deployment create throws RequestInvalid when overwriting an existing
+          # deployment at the REST API level, even though the docs say it overwrites.
+          if az ml batch-deployment show \
+              --name main \
+              --endpoint-name titanic-batch-endpoint \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) > /dev/null 2>&1; then
+            echo "Deployment exists. Updating model to version ${{ parameters.modelVersion }}..."
+            az ml batch-deployment update \
+              --name main \
+              --endpoint-name titanic-batch-endpoint \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --set model=azureml:$(modelName):${{ parameters.modelVersion }}
+          else
+            echo "Deployment not found. Creating fresh..."
+            az ml batch-deployment create \
+              --file mlpipelines/inference/batch_deployment.yml \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
+              --set-default
+          fi
 
           echo "Deployment successful!"
           echo "Batch endpoint 'titanic-batch-endpoint' is live and ready to accept invocations."
