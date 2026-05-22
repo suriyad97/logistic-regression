@@ -1,13 +1,5 @@
 trigger:
-  branches:
-    include:
-    - master
-  paths:
-    include:
-    - config/conda.yml
-    - config/environment.yml
-    - Dockerfile.train
-    - azdopipelines/ci-setup-environment.yml
+    None
 
 pr:
   branches:
