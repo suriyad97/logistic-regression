@@ -106,5 +106,6 @@ stages:
             --no-wait
 
           echo "Deployment initiated successfully!"
+          REGION=$(az group show -n $(devRG) --query location -o tsv)
           echo "Your FastAPI endpoint will be available shortly at:"
-          echo "http://titanic-api-$(Build.BuildId).<your-azure-region>.azurecontainer.io:8000/docs"
+          echo "http://titanic-api-$(Build.BuildId).$REGION.azurecontainer.io:8000/docs"
