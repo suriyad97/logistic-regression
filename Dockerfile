@@ -30,8 +30,8 @@ COPY src/     ./src/
 COPY scripts/ ./scripts/
 COPY config/  ./config/
 
-# Model artifacts are baked directly into the Docker image
-COPY model/ /model/
+# Create empty model directory for volume mounting at runtime
+RUN mkdir -p /model
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
