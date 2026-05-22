@@ -34,8 +34,8 @@ stages:
       displayName: 'Use Python $(pythonVersion)'
 
     - script: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary :all: -r requirements.txt
       displayName: 'Install Dependencies'
 
     # Pull baseline feature statistics from DEV workspace (training run)
@@ -185,8 +185,8 @@ stages:
       displayName: 'Use Python $(pythonVersion)'
 
     - script: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary :all: -r requirements.txt
       displayName: 'Install Dependencies'
 
     - task: DownloadBuildArtifacts@1

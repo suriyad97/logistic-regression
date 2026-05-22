@@ -1,0 +1,275 @@
+trigger:
+  branches:
+    include:
+    - master
+  paths:
+    include:
+    - config/conda.yml
+    - config/environment.yml
+    - Dockerfile.train
+    - azdopipelines/ci-setup-environment.yml
+
+pr:
+  branches:
+    include:
+    - master
+  paths:
+    include:
+    - config/conda.yml
+    - Dockerfile.train
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: ml-pipeline-vars
+- name: imageTag
+  value: 'titanic-logistic-regression:$(Build.BuildId)'
+- name: environmentName
+  value: 'titanic-logistic-regression'
+- name: environmentVersion
+  value: '$(Build.BuildId)'
+- name: devACR
+  value: 'logistic'
+- name: qaACR
+  value: 'logisticqa'
+- name: prodACR
+  value: 'logisticprod'
+- name: devRG
+  value: 'ml-pipeline-rg'
+- name: devWS
+  value: 'logistic-regression-ws'
+- name: qaRG
+  value: 'ml-pipelines-rg-qa'
+- name: qaWS
+  value: 'logistic-regression-qa'
+- name: prodRG
+  value: 'ml-pipeline-rg-prod'
+- name: prodWS
+  value: 'logistic-regression-prod'
+
+# =============================================================
+# CI Pipeline - Build, Push to ACR, Create AML Env, Promote
+#
+# Stage 1 - DEV:
+#   az acr build  -> builds Dockerfile.train in ACR managed infra
+#                    (NO compute cluster, runs in Azure ACR service)
+#                 -> pushes image to logistic.azurecr.io
+#   az ml environment create --image -> registers built image as AML env
+#
+# Stage 2 - QA (manual approval):
+#   az acr import -> copies image from DEV ACR to logisticqa ACR (no rebuild)
+#   az ml environment create --image -> registers same image in QA workspace
+#
+# Stage 3 - PROD (manual approval):
+#   az acr import -> copies image from QA ACR to logisticprod ACR (no rebuild)
+#   az ml environment create --image -> registers same image in PROD workspace
+# =============================================================
+
+stages:
+
+# ------------------------------------------------------------------
+# STAGE 1 - DEV
+# Build Docker image in ACR, push, register as AML environment
+# ------------------------------------------------------------------
+- stage: CI_Dev
+  displayName: 'DEV - Build and Push Docker Image to ACR'
+  jobs:
+  - job: BuildAndRegister
+    displayName: 'az acr build -> push to logistic.azurecr.io -> create AML env'
+    timeoutInMinutes: 90
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Build Docker image on AzDO agent and push to DEV ACR'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+
+          IMAGE="$(devACR).azurecr.io/$(imageTag)"
+          echo "=== Building Docker image on AzDO agent ==="
+          echo "Image: $IMAGE"
+
+          # Login to DEV ACR
+          az acr login --name $(devACR) --resource-group $(devRG)
+
+          # Build image using Docker (pre-installed on Ubuntu agent)
+          docker build \
+            --file Dockerfile.train \
+            --tag $IMAGE \
+            .
+
+          # Push to DEV ACR
+          docker push $IMAGE
+          echo "Image pushed to DEV ACR: $IMAGE"
+          echo "##vso[task.setvariable variable=FULL_IMAGE]$IMAGE"
+
+    - task: AzureCLI@2
+      displayName: 'Register AML environment in DEV workspace'
+      name: registerDev
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          FULL_IMAGE="$(devACR).azurecr.io/$(imageTag)"
+          echo "Registering environment: $FULL_IMAGE"
+
+          az ml environment create \
+            --name $(environmentName) \
+            --version $(environmentVersion) \
+            --image "$FULL_IMAGE" \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS)
+
+          az ml environment show \
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --query "{name:name, version:version, image:image}" -o table
+
+          echo "##vso[task.setvariable variable=FULL_IMAGE;isOutput=true]$FULL_IMAGE"
+
+# ------------------------------------------------------------------
+# STAGE 2 - QA
+# Copy image from DEV ACR to QA ACR, register in QA workspace
+# ------------------------------------------------------------------
+- stage: CI_QA
+  displayName: 'QA - Import Image and Register Environment'
+  dependsOn: CI_Dev
+  condition: succeeded()
+  variables:
+    FULL_IMAGE: $[ stageDependencies.CI_Dev.BuildAndRegister.outputs['registerDev.FULL_IMAGE'] ]
+  jobs:
+  - job: ApprovalGate_QA
+    displayName: 'Manual Approval - Promote to QA'
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'suriya.divi@outlook.com'
+        instructions: 'Docker image built and pushed to DEV ACR. Approve to import same image to logisticqa ACR and register in logistic-regression-qa.'
+        onTimeout: 'reject'
+        timeout: '1440'
+
+  - job: ImportAndRegisterQA
+    displayName: 'Import image to logisticqa ACR -> register in QA workspace'
+    dependsOn: ApprovalGate_QA
+    condition: succeeded()
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Import image from DEV ACR to QA ACR'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Importing image to QA ACR (no rebuild)..."
+          echo "Source : $(FULL_IMAGE)"
+          echo "Target : $(qaACR).azurecr.io/$(imageTag)"
+
+          az acr import \
+            --name $(qaACR) \
+            --resource-group $(qaRG) \
+            --source "$(FULL_IMAGE)" \
+            --image $(imageTag) \
+            --force
+
+          QA_IMAGE="$(qaACR).azurecr.io/$(imageTag)"
+          echo "Image imported to QA ACR: $QA_IMAGE"
+
+          az ml environment create \
+            --name $(environmentName) \
+            --version $(environmentVersion) \
+            --image "$QA_IMAGE" \
+            --resource-group $(qaRG) \
+            --workspace-name $(qaWS)
+
+          az ml environment show \
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(qaRG) \
+            --workspace-name $(qaWS) \
+            --query "{name:name, version:version, image:image}" -o table
+
+# ------------------------------------------------------------------
+# STAGE 3 - PROD
+# Copy image from QA ACR to PROD ACR, register in PROD workspace
+# ------------------------------------------------------------------
+- stage: CI_Prod
+  displayName: 'PROD - Import Image and Register Environment'
+  dependsOn: CI_QA
+  condition: succeeded()
+  variables:
+    FULL_IMAGE: $[ stageDependencies.CI_Dev.BuildAndRegister.outputs['registerDev.FULL_IMAGE'] ]
+  jobs:
+  - job: ApprovalGate_Prod
+    displayName: 'Manual Approval - Promote to PROD'
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'suriya.divi@outlook.com'
+        instructions: 'QA environment validated. Approve to import same image to logisticprod ACR and register in logistic-regression-prod.'
+        onTimeout: 'reject'
+        timeout: '1440'
+
+  - job: ImportAndRegisterProd
+    displayName: 'Import image to logisticprod ACR -> register in PROD workspace'
+    dependsOn: ApprovalGate_Prod
+    condition: succeeded()
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Import image from QA ACR to PROD ACR'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "Importing image to PROD ACR (no rebuild)..."
+          PROD_IMAGE="$(prodACR).azurecr.io/$(imageTag)"
+
+          az acr import \
+            --name $(prodACR) \
+            --resource-group $(prodRG) \
+            --source "$(qaACR).azurecr.io/$(imageTag)" \
+            --image $(imageTag) \
+            --force
+
+          echo "Image imported to PROD ACR: $PROD_IMAGE"
+
+          az ml environment create \
+            --name $(environmentName) \
+            --version $(environmentVersion) \
+            --image "$PROD_IMAGE" \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS)
+
+          az ml environment show \
+            --name $(environmentName) \
+            --label latest \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
+            --query "{name:name, version:version, image:image}" -o table
+
+          echo "{\"promoted_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"image\": \"$PROD_IMAGE\", \"build\": \"$(Build.BuildId)\"}" > env_audit.json
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'env_audit.json'
+        ArtifactName: 'environment-audit'
+      condition: always()

@@ -1,5 +1,14 @@
 trigger:
-    None
+  branches:
+    include:
+    - master
+  paths:
+    include:
+    - src/
+    - azdopipelines/ct-train-register-model.yml
+    exclude:
+    - README.md
+    - CHANGELOG.md
 
 pr: none
 
