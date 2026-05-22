@@ -66,13 +66,14 @@ stages:
           echo "=== Registering Data Asset for Batch Invoke ==="
           # We register the URI as an Azure ML Data Asset first to bypass an Azure CLI tenant mismatch bug 
           # that occurs when passing raw datastore URIs to the invoke command via Workload Identity.
-          az ml data create --name batch-test-data --path $(inputDataPath) --type uri_file \
-            --resource-group $(devRG) --workspace-name $(devWS)
+          VERSION=$(az ml data create --name batch-test-data --path $(inputDataPath) --type uri_file \
+            --resource-group $(devRG) --workspace-name $(devWS) \
+            --query version -o tsv)
 
           echo "=== Testing Batch Endpoint ==="
           JOB_NAME=$(az ml batch-endpoint invoke \
             --name titanic-batch-endpoint \
-            --input azureml:batch-test-data@latest \
+            --input azureml:batch-test-data:$VERSION \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
             --query name -o tsv)
