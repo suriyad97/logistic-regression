@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user --only-binary :all: -r requirements.txt
+RUN pip install --no-cache-dir --user -r requirements.txt
 
 # ── Stage 2: runtime ──────────────────────────────────────────────
 FROM python:3.10-slim
@@ -34,7 +34,7 @@ COPY config/  ./config/
 COPY model/ /model/
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:$PYTHONPATH
+ENV PYTHONPATH=/app
 ENV MODEL_PATH=/model/model.pkl
 ENV PREPROCESSOR_PATH=/model/preprocessor.pkl
 ENV PORT=8000
