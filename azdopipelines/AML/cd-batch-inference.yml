@@ -68,6 +68,7 @@ stages:
           
           JOB_NAME=$(az ml batch-endpoint invoke \
             --name titanic-batch-endpoint \
+            --input-type uri_file \
             --input $(inputDataPath) \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
