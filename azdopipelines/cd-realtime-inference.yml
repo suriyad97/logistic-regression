@@ -71,11 +71,14 @@ stages:
             --resource-group $(devRG) --workspace-name $(devWS) --download-path ./downloaded_model
           
           echo "=== Uploading Model to File Share ==="
-          # The model artifact usually has the actual model inside a subdirectory (often named "model").
-          # To ensure the files match the Dockerfile expectations, we upload the contents to the root of the share.
+          # Azure ML model download creates nested folders (like a UUID folder). 
+          # We need to find the exact directory containing model.pkl so we upload from the correct root.
+          MODEL_DIR=$(dirname $(find ./downloaded_model -name "model.pkl" | head -n 1))
+          echo "Found model files in: $MODEL_DIR"
+          
           az storage file upload-batch \
             --destination $SHARE_NAME \
-            --source ./downloaded_model/$(modelName)/ \
+            --source $MODEL_DIR \
             --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY
 
           echo "=== Fetching Latest Docker Image Tag from ACR ==="
