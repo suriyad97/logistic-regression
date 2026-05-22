@@ -62,14 +62,6 @@ stages:
             echo "Endpoint already exists. Skipping creation."
           fi
 
-          echo "=== Resolving exact Environment version ==="
-          ENV_VERSION=$(az ml environment list \
-            --name $(modelName) \
-            --resource-group $(devRG) \
-            --workspace-name $(devWS) \
-            --query "[-1].version" -o tsv)
-          echo "Using environment version: $ENV_VERSION"
-
           echo "=== Deploying Model to Batch Endpoint ==="
           # Idempotent: use 'create' on first deploy, 'update' on subsequent deploys.
           # az ml batch-deployment create throws RequestInvalid when overwriting an existing
@@ -85,8 +77,7 @@ stages:
               --endpoint-name titanic-batch-endpoint \
               --resource-group $(devRG) \
               --workspace-name $(devWS) \
-              --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
-              --set environment=azureml:$(modelName):$ENV_VERSION
+              --set model=azureml:$(modelName):${{ parameters.modelVersion }}
           else
             echo "Deployment not found. Creating fresh..."
             az ml batch-deployment create \
@@ -94,7 +85,6 @@ stages:
               --resource-group $(devRG) \
               --workspace-name $(devWS) \
               --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
-              --set environment=azureml:$(modelName):$ENV_VERSION \
               --set-default
           fi
 
