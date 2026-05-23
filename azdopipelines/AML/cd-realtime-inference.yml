@@ -1,8 +1,12 @@
 parameters:
 - name: modelVersion
-  displayName: 'Model Version to Deploy'
+  displayName: 'Model Version to Deploy (e.g. 2, 3)'
   type: string
   default: 2
+- name: canaryTrafficPercentage
+  displayName: 'Canary Traffic Percentage (0-100)'
+  type: number
+  default: 10
 
 trigger: none
 
@@ -17,57 +21,142 @@ variables:
   value: 'logistic-regression-ws'
 - name: modelName
   value: 'titanic-logistic-regression'
+- name: endpointName
+  value: 'titanic-realtime-endpoint'
+- name: newDeploymentName
+  value: 'v${{ parameters.modelVersion }}'
 
 # =============================================================
 # CD Pipeline - Real-Time Inference (Azure ML Managed Online Endpoint)
-#
-# Deploys a robust, auto-scaling real-time REST endpoint using 
-# Azure ML Managed Online Endpoints with our custom Docker container.
+# Canary Rollout (A/B Testing) Architecture
 # =============================================================
 
 stages:
-- stage: Deploy_RealTime_API
-  displayName: 'Deploy Real-Time API to Azure ML'
+# ─────────────────────────────────────────────────────────────────
+# STAGE 1: Deploy Canary
+# ─────────────────────────────────────────────────────────────────
+- stage: Deploy_Canary
+  displayName: 'Deploy Canary (Phase 1)'
   jobs:
-  - job: DeployManagedEndpoint
-    displayName: 'Deploy to Managed Online Endpoint'
+  - job: DeployCanaryEndpoint
+    displayName: 'Deploy New Version and Split Traffic'
     timeoutInMinutes: 60
     steps:
     - checkout: self
 
     - task: AzureCLI@2
-      displayName: 'Deploy to Azure ML Managed Online Endpoint'
+      displayName: 'Execute Canary Deployment'
       inputs:
         azureSubscription: 'Azure ML Connection'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
           set -e
-          
-          echo "=== Installing Azure ML CLI ==="
           az extension add -n ml -y --allow-preview true
 
-          echo "=== Creating Managed Online Endpoint ==="
-          # Creates the endpoint if it doesn't exist, updates if it does
+          echo "=== Creating/Updating Managed Online Endpoint ==="
           az ml online-endpoint create \
             --file mlpipelines/inference/online_endpoint.yml \
             --resource-group $(devRG) \
             --workspace-name $(devWS)
 
-          echo "=== Deploying Model to Endpoint ==="
-          # Create a new deployment and route 100% of traffic to it.
-          # We dynamically inject the selected modelVersion.
+          echo "=== Finding Current Primary Deployment ==="
+          # Fetch the deployment with the highest traffic, or just the first key if there is traffic
+          CURRENT_PRIMARY=$(az ml online-endpoint show -n $(endpointName) -g $(devRG) -w $(devWS) --query "traffic | keys(@)[0]" -o tsv 2>/dev/null || echo "")
+
+          echo "=== Deploying New Version (0% initial traffic) ==="
+          # Deploy without --all-traffic. This creates the deployment but routes 0% traffic to it.
           az ml online-deployment create \
+            --name $(newDeploymentName) \
+            --endpoint-name $(endpointName) \
             --file mlpipelines/inference/online_deployment.yml \
             --resource-group $(devRG) \
             --workspace-name $(devWS) \
-            --set model=azureml:$(modelName):${{ parameters.modelVersion }} \
-            --all-traffic
+            --set model=azureml:$(modelName):${{ parameters.modelVersion }}
 
-          echo "Deployment successful!"
+          echo "=== Splitting Traffic (Canary A/B Test) ==="
+          if [ -n "$CURRENT_PRIMARY" ] && [ "$CURRENT_PRIMARY" != "$(newDeploymentName)" ]; then
+            CANARY_PCT=${{ parameters.canaryTrafficPercentage }}
+            PRIMARY_PCT=$((100 - CANARY_PCT))
+            
+            echo "Routing $CANARY_PCT% to $(newDeploymentName) and $PRIMARY_PCT% to $CURRENT_PRIMARY"
+            az ml online-endpoint update \
+              --name $(endpointName) \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --traffic "$CURRENT_PRIMARY=$PRIMARY_PCT $(newDeploymentName)=$CANARY_PCT"
+          else
+            echo "No previous deployment found or it is the same version. Routing 100% to $(newDeploymentName)"
+            az ml online-endpoint update \
+              --name $(endpointName) \
+              --resource-group $(devRG) \
+              --workspace-name $(devWS) \
+              --traffic "$(newDeploymentName)=100"
+          fi
+
+          SCORING_URI=$(az ml online-endpoint show -n $(endpointName) -g $(devRG) -w $(devWS) --query scoring_uri -o tsv)
+          echo "Endpoint is Live at: $SCORING_URI"
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 2: Manual Approval Gate
+# ─────────────────────────────────────────────────────────────────
+- stage: Await_Approval
+  displayName: 'Await Business Approval'
+  dependsOn: Deploy_Canary
+  jobs:
+  - deployment: ApprovalGate
+    displayName: 'Manual Approval Check'
+    # This environment MUST be created in Azure DevOps -> Pipelines -> Environments
+    # with an "Approver" check added to it to function as a pause gate.
+    environment: 'PROD-RealTime-Endpoint'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              echo "Approval received. Proceeding to promotion."
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 3: Promote & Cleanup
+# ─────────────────────────────────────────────────────────────────
+- stage: Promote_To_Production
+  displayName: 'Promote to 100% and Cleanup'
+  dependsOn: Await_Approval
+  jobs:
+  - job: PromoteAndCleanup
+    displayName: 'Shift Traffic and Delete Old Deployments'
+    steps:
+    - checkout: none
+    - task: AzureCLI@2
+      displayName: 'Promote Canary'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "=== Promoting $(newDeploymentName) to 100% Traffic ==="
+          az ml online-endpoint update \
+            --name $(endpointName) \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --traffic "$(newDeploymentName)=100"
+
+          echo "=== Cleaning Up Old Deployments ==="
+          DEPLOYMENTS=$(az ml online-deployment list --endpoint-name $(endpointName) --resource-group $(devRG) --workspace-name $(devWS) --query "[].name" -o tsv)
           
-          # Fetch the scoring URI dynamically
-          SCORING_URI=$(az ml online-endpoint show -n titanic-realtime-endpoint -g $(devRG) -w $(devWS) --query scoring_uri -o tsv)
+          for DEP in $DEPLOYMENTS; do
+            if [ "$DEP" != "$(newDeploymentName)" ]; then
+              echo "Deleting old deployment: $DEP"
+              az ml online-deployment delete \
+                --name $DEP \
+                --endpoint-name $(endpointName) \
+                --resource-group $(devRG) \
+                --workspace-name $(devWS) \
+                --yes
+            fi
+          done
           
-          echo "Your Production-Ready Endpoint is Live at:"
-          echo "$SCORING_URI"
+          echo "Canary Rollout Complete."
