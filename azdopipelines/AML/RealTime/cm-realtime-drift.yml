@@ -1,0 +1,174 @@
+trigger: none
+
+# Runs every day at 2:00 AM UTC to process the previous 24 hours of traffic
+schedules:
+- cron: "0 2 * * *"
+  displayName: 'Daily Real-Time Drift Detection at 2 AM UTC'
+  branches:
+    include:
+    - master
+  always: true
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.12'
+  modelName: 'titanic-logistic-regression'
+  dataDistributionThreshold: 0.05
+  storageAccount: 'logisticregressionstg' # Replace with actual AML storage account
+  containerName: 'model-data-collector'
+  endpointName: 'titanic-realtime-endpoint'
+
+stages:
+# ─────────────────────────────────────────────────────────────────
+# STAGE 1: Download MDC Logs & Run Drift Detection
+# ─────────────────────────────────────────────────────────────────
+- stage: Monitor_RealTime_Early_Warning
+  displayName: 'CM: Real-Time Early Warning (Data & Prediction Drift)'
+  jobs:
+  - job: DetectDrift
+    displayName: 'Detect Real-Time Data Drift'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary :all: -r requirements.txt
+        pip install pandas
+      displayName: 'Install Dependencies'
+
+    # Pull baseline feature statistics from DEV workspace (training run)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/get_baseline_data.py \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --model-name $(modelName) \
+            --output baseline_stats.json
+      displayName: 'Retrieve Baseline Statistics'
+      env:
+        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+
+    # Download raw JSONL logs from MDC Blob Storage for yesterday
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          YESTERDAY=$(date -d "yesterday" '+%Y/%m/%d')
+          echo "Downloading MDC logs for date: $YESTERDAY"
+          
+          mkdir -p ./raw_jsonl_data
+          
+          # This command assumes the Azure CLI is logged in via the Service Connection
+          # and has Storage Blob Data Reader access to the storage account.
+          az storage blob download-batch \
+            --account-name $(storageAccount) \
+            --source $(containerName) \
+            --pattern "${endpointName}/*/$YESTERDAY/*.jsonl" \
+            --destination ./raw_jsonl_data \
+            --auth-mode login
+      displayName: 'Download Past 24h MDC Logs'
+
+    # Flatten the JSONL logs into a single CSV
+    - script: |
+        python scripts/flatten_mdc_logs.py \
+          --input ./raw_jsonl_data \
+          --output ./predictions/realtime_predictions.csv
+      displayName: 'Flatten MDC Logs to CSV'
+
+    # Detect data distribution drift (KS test + Wasserstein)
+    - script: |
+        python mlpipelines/monitoring/detect_data_drift.py \
+          --baseline-stats baseline_stats.json \
+          --production-data ./predictions \
+          --threshold $(dataDistributionThreshold) \
+          --output data_drift_report.json
+      displayName: 'Detect Data Distribution Drift'
+
+    # Consolidate into a single severity-graded report
+    - script: |
+        python scripts/analyze_drift_results.py \
+          --drift-report data_drift_report.json \
+          --output analysis_results.json
+      displayName: 'Analyze Drift Results'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'analysis_results.json'
+        ArtifactName: 'drift-analysis'
+      displayName: 'Publish Drift Analysis Report'
+      condition: always()
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'data_drift_report.json'
+        ArtifactName: 'drift-reports'
+      displayName: 'Publish Raw Drift Reports'
+      condition: always()
+
+    # Exit 1 if drift is actionable — triggers the Notify stage
+    - script: |
+        python scripts/check_drift_threshold.py \
+          --drift-report data_drift_report.json \
+          --analysis analysis_results.json
+      displayName: 'Check Drift Threshold (Gate)'
+      continueOnError: true
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 2: Alert the team (runs when Monitor fails)
+# ─────────────────────────────────────────────────────────────────
+- stage: Notify_and_Alert
+  displayName: 'Send Alerts if Drift Detected'
+  dependsOn: Monitor_RealTime_Early_Warning
+  condition: failed()
+  jobs:
+  - job: SendAlerts
+    displayName: 'Send Notifications & Log to App Insights'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary :all: -r requirements.txt
+      displayName: 'Install Dependencies'
+
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'drift-analysis'
+        downloadPath: '$(System.ArtifactsDirectory)'
+      displayName: 'Download Drift Analysis'
+      continueOnError: true
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/log_alert_to_insights.py \
+            --severity HIGH \
+            --message "Data/Prediction drift detected in Real-Time endpoint" \
+            --build-uri $(Build.BuildUri)
+      displayName: 'Log Alert to Application Insights'
+      env:
+        APPINSIGHTS_KEY: $(APPINSIGHTS_KEY)
+      condition: always()

@@ -1,0 +1,203 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.12'
+  modelName: 'titanic-logistic-regression'
+  conceptDriftThreshold: 0.03
+  storageAccount: 'logisticregressionstg' # Replace with actual AML storage account
+  containerName: 'model-data-collector'
+  endpointName: 'titanic-realtime-endpoint'
+
+stages:
+# ─────────────────────────────────────────────────────────────────
+# STAGE 1: Run concept drift detection (Requires Ground Truth)
+# ─────────────────────────────────────────────────────────────────
+- stage: Monitor_Model_Quality
+  displayName: 'CM: Real-Time Concept Drift (Model Quality)'
+  jobs:
+  - job: DetectConceptDrift
+    displayName: 'Detect Concept Drift'
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary :all: -r requirements.txt
+        pip install pandas
+      displayName: 'Install Dependencies'
+
+    # Pull baseline feature statistics from DEV workspace (training run)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/get_baseline_data.py \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --model-name $(modelName) \
+            --output baseline_stats.json
+      displayName: 'Retrieve Baseline Statistics'
+      env:
+        AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+
+    # Download raw JSONL logs from MDC Blob Storage (Historical)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Downloading historical MDC logs for predictions..."
+          mkdir -p ./raw_jsonl_data
+          
+          az storage blob download-batch \
+            --account-name $(storageAccount) \
+            --source $(containerName) \
+            --pattern "${endpointName}/*/*/*/*/*.jsonl" \
+            --destination ./raw_jsonl_data \
+            --auth-mode login
+      displayName: 'Download Historical MDC Logs'
+
+    # Flatten the JSONL logs into a single CSV
+    - script: |
+        mkdir -p ./predictions
+        python scripts/flatten_mdc_logs.py \
+          --input ./raw_jsonl_data \
+          --output ./predictions/realtime_predictions.csv
+      displayName: 'Flatten MDC Logs to CSV'
+
+    # Download ground truth feedback
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az extension add -n ml -y
+
+          GT_VERSION=$(az ml data list \
+            --name titanic-feedback \
+            --resource-group $(prodRG) \
+            --workspace-name $(prodWS) \
+            --query "[0].version" -o tsv 2>/dev/null || echo "")
+
+          if [ -n "$GT_VERSION" ]; then
+            echo "Found feedback data v$GT_VERSION — downloading"
+            az ml data download \
+              --name titanic-feedback \
+              --version $GT_VERSION \
+              --download-path ./ground_truth \
+              --resource-group $(prodRG) \
+              --workspace-name $(prodWS)
+            echo "##vso[task.setvariable variable=HAS_GROUND_TRUTH]true"
+          else
+            echo "No feedback data found! Concept drift requires ground truth."
+            echo "##vso[task.setvariable variable=HAS_GROUND_TRUTH]false"
+            exit 1
+          fi
+      displayName: 'Download Ground Truth Feedback'
+
+    # Detect concept drift (requires ground truth)
+    - script: |
+        python mlpipelines/monitoring/detect_concept_drift.py \
+          --baseline-stats baseline_stats.json \
+          --predictions-path ./predictions \
+          --ground-truth-path ./ground_truth \
+          --threshold $(conceptDriftThreshold) \
+          --output concept_drift_report.json
+      displayName: 'Detect Concept Drift'
+
+    # Consolidate into a single severity-graded report
+    - script: |
+        python scripts/analyze_drift_results.py \
+          --concept-drift-report concept_drift_report.json \
+          --output analysis_results.json
+      displayName: 'Analyze Concept Drift Results'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'analysis_results.json'
+        ArtifactName: 'drift-analysis'
+      displayName: 'Publish Drift Analysis Report'
+      condition: always()
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'concept_drift_report.json'
+        ArtifactName: 'drift-reports'
+      displayName: 'Publish Raw Concept Drift Report'
+      condition: always()
+
+    - script: |
+        python scripts/check_drift_threshold.py \
+          --concept-drift-report concept_drift_report.json \
+          --analysis analysis_results.json
+      displayName: 'Check Drift Threshold (Gate)'
+      continueOnError: true
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 2: Alert the team
+# ─────────────────────────────────────────────────────────────────
+- stage: Notify_and_Alert
+  displayName: 'Send Alerts if Concept Drift Detected'
+  dependsOn: Monitor_Model_Quality
+  condition: failed()
+  jobs:
+  - job: SendAlerts
+    displayName: 'Send Notifications & Log to App Insights'
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python scripts/log_alert_to_insights.py \
+            --severity HIGH \
+            --message "Concept drift (accuracy decay) detected in Real-Time model" \
+            --build-uri $(Build.BuildUri)
+      displayName: 'Log Alert to Application Insights'
+      env:
+        APPINSIGHTS_KEY: $(APPINSIGHTS_KEY)
+      continueOnError: true
+
+# ─────────────────────────────────────────────────────────────────
+# STAGE 3: Log Recommendation
+# ─────────────────────────────────────────────────────────────────
+- stage: Log_Retrain_Recommendation
+  displayName: 'Log Retraining Recommendation'
+  dependsOn: Notify_and_Alert
+  condition: succeeded()
+  jobs:
+  - job: LogRecommendation
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          python -c "
+          import json, datetime
+          rec = {
+            'timestamp': datetime.datetime.utcnow().isoformat(),
+            'recommendation': 'RETRAIN',
+            'reason': 'Concept drift detected in Real-Time production',
+            'action_required': 'Manually trigger ct-train-register-model pipeline',
+            'build': '$(Build.BuildNumber)'
+          }
+          with open('retrain_recommendation.json', 'w') as f:
+              json.dump(rec, f, indent=2)
+          "
+      displayName: 'Write Retraining Recommendation JSON'
