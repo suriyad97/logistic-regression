@@ -1,0 +1,76 @@
+# =============================================================
+# Scheduled Pipeline - Batch Inference
+#
+# Runs automatically on a daily schedule to pull the latest data,
+# register it in Azure ML, and invoke the managed batch endpoint.
+# =============================================================
+
+trigger: none
+
+# Runs every day at midnight UTC
+schedules:
+- cron: '0 0 * * *'
+  displayName: Daily Midnight Inference
+  branches:
+    include:
+    - master
+  always: true
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: ml-pipeline-vars
+- name: devRG
+  value: 'ml-pipeline-rg'
+- name: devWS
+  value: 'logistic-regression-ws'
+- name: inputDataFile
+  value: 'data/inference/test.csv'
+
+stages:
+- stage: Scheduled_Inference
+  displayName: 'Run Scheduled Batch Inference'
+  jobs:
+  - job: InvokeBatchEndpoint
+    displayName: 'Invoke Batch Endpoint'
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Trigger Managed Batch Endpoint'
+      inputs:
+        azureSubscription: 'Azure ML Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          az extension add -n ml -y --allow-preview true
+
+          echo "=== Registering Daily Data Asset ==="
+          # Create a unique version using Unix timestamp
+          DATA_VERSION=$(date +%s)
+          VERSION=$(az ml data create \
+            --name daily-inference-data \
+            --path $(inputDataFile) \
+            --type uri_file \
+            --version $DATA_VERSION \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --query version -o tsv)
+          
+          echo "Created Data Asset: daily-inference-data version $VERSION"
+
+          echo "=== Invoking Batch Endpoint ==="
+          JOB_NAME=$(az ml batch-endpoint invoke \
+            --name titanic-batch-endpoint \
+            --input azureml:daily-inference-data:$VERSION \
+            --resource-group $(devRG) \
+            --workspace-name $(devWS) \
+            --query name -o tsv)
+
+          echo "Batch Inference Job submitted: $JOB_NAME"
+          
+          # Optional: You can uncomment below if you want the pipeline to wait until the job finishes
+          # echo "Streaming logs..."
+          # az ml job stream --name $JOB_NAME --resource-group $(devRG) --workspace-name $(devWS)
