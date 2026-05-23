@@ -70,17 +70,30 @@ def determine_severity(data_summary: dict, concept_summary: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Consolidate drift reports")
-    parser.add_argument("--drift-report",         required=True, help="Data drift report JSON")
-    parser.add_argument("--concept-drift-report",  required=True, help="Concept drift report JSON")
-    parser.add_argument("--output",                default="analysis_results.json")
+    parser.add_argument("--drift-report",         required=False, help="Data drift report JSON")
+    parser.add_argument("--concept-drift-report", required=False, help="Concept drift report JSON")
+    parser.add_argument("--output",               default="analysis_results.json")
     args = parser.parse_args()
 
     logger.info("Loading drift reports…")
-    data_report    = load_json(args.drift_report)
-    concept_report = load_json(args.concept_drift_report)
+    
+    # Load Data Drift Report if provided
+    data_summary = summarize_data_drift({})
+    if args.drift_report:
+        try:
+            data_report = load_json(args.drift_report)
+            data_summary = summarize_data_drift(data_report)
+        except Exception as e:
+            logger.warning(f"Could not load data drift report {args.drift_report}: {e}")
 
-    data_summary    = summarize_data_drift(data_report)
-    concept_summary = summarize_concept_drift(concept_report)
+    # Load Concept Drift Report if provided
+    concept_summary = summarize_concept_drift({})
+    if args.concept_drift_report:
+        try:
+            concept_report = load_json(args.concept_drift_report)
+            concept_summary = summarize_concept_drift(concept_report)
+        except Exception as e:
+            logger.warning(f"Could not load concept drift report {args.concept_drift_report}: {e}")
     severity        = determine_severity(data_summary, concept_summary)
 
     any_drift = (
