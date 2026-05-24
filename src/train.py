@@ -98,15 +98,19 @@ _SOLVER_PENALTY_MAP = {
 
 def _suggest_params(trial: "optuna.Trial") -> dict:
     """Define the Optuna hyperparameter search space."""
-    penalty = trial.suggest_categorical("penalty", ["l1", "l2"])
-    solver  = trial.suggest_categorical(
-        "solver",
-        _SOLVER_PENALTY_MAP[penalty],
+    combo = trial.suggest_categorical(
+        "solver_penalty",
+        [
+            "lbfgs_l2", "lbfgs_none",
+            "liblinear_l1", "liblinear_l2",
+            "saga_l1", "saga_l2", "saga_none"
+        ]
     )
+    solver, penalty = combo.split("_")
     return {
         "C":            trial.suggest_float("C", 1e-3, 10.0, log=True),
-        "penalty":      penalty,
         "solver":       solver,
+        "penalty":      penalty if penalty != "none" else None,
         "class_weight": trial.suggest_categorical("class_weight", ["balanced", None]),
         "max_iter":     trial.suggest_int("max_iter", 200, 2000, step=200),
         "random_state": 42,

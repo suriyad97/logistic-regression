@@ -174,26 +174,28 @@ def batch_inference(model_path: str, preprocessor_path: str, input_data_path: st
         print(f"Predicted survivors: {sum(results['predictions'])}")
         print(f"Predicted non-survivors: {len(results['predictions']) - sum(results['predictions'])}")
         print(f"Mean survival probability: {np.mean(results['survival_probability']):.2%}")
+
         
     except Exception as e:
         logger.error(f"Error during batch inference: {str(e)}", exc_info=True)
         raise
 
 
-if __name__ == '__main__':
+def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Run inference with trained model')
-    parser.add_argument('--model', type=str, required=True, help='Path to trained model')
-    parser.add_argument('--preprocessor', type=str, required=True, help='Path to preprocessor')
-    parser.add_argument('--input', type=str, required=True, help='Path to input data')
-    parser.add_argument('--output', type=str, required=True, help='Path to save predictions')
-    
+    parser = argparse.ArgumentParser(description="Batch inference using a trained model and preprocessor.")
+    parser.add_argument("--model", type=str, required=True, help="Path to trained model (e.g., model.pkl)")
+    parser.add_argument("--preprocessor", type=str, required=True, help="Path to DataProcessor (e.g., preprocessor.joblib)")
+    parser.add_argument("--data", type=str, required=True, help="Path to raw inference data CSV")
+    parser.add_argument("--output", type=str, default="predictions.csv", help="Path to save predictions")
     args = parser.parse_args()
-    
+
     batch_inference(
         os.path.abspath(args.model),
         os.path.abspath(args.preprocessor),
-        os.path.abspath(args.input),
+        os.path.abspath(args.data),
         os.path.abspath(args.output)
     )
+
+if __name__ == '__main__':
+    main()

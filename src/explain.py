@@ -62,7 +62,7 @@ except ImportError:
 try:
     import shap
     HAS_SHAP = True
-except ImportError:
+except Exception:
     HAS_SHAP = False
 
 # ── LIME ──────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ try:
     import lime
     import lime.lime_tabular
     HAS_LIME = True
-except ImportError:
+except Exception:
     HAS_LIME = False
 
 logging.basicConfig(
